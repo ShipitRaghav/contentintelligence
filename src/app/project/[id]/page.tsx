@@ -2,28 +2,28 @@
 
 import { motion } from 'framer-motion';
 import {
-    ArrowLeft, Share2, Settings, MoreVertical, Plus, Search,
-    Globe, Zap, Upload, Mic, Video, FileText, Layout, Layers,
-    CreditCard, PieChart, ArrowRight, PanelLeftClose, PanelRightClose, ChevronDown, HardDrive, Loader2, Sparkles, Users, TrendingUp, Pencil, Image, ShieldCheck, ClipboardCheck, Youtube
+    Share2, Settings, MoreVertical, Plus,
+    Zap, Mic, Video, FileText,
+    PanelLeftClose, PanelRightClose, Sparkles, Users, Pencil, Image, ShieldCheck, Youtube,
+    MessageSquarePlus, History, Trash2, AlertCircle, X
 } from 'lucide-react';
 import Link from 'next/link';
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { useProduct } from '@/lib/productContext';
 import AddSourcesModal from '@/components/AddSourcesModal';
 import StudioModal from '@/components/StudioModal';
 import CustomizeTextModal from '@/components/CustomizeTextModal';
-import CustomizeAudioModal from '@/components/CustomizeAudioModal';
 import CustomizeImageModal from '@/components/CustomizeImageModal';
 import ContentGenerated from '@/components/ContentGenerated';
 import TextContentDetails from '@/components/TextContentDetails';
 import LanguageSelector from '@/components/LanguageSelector';
-import PapersFetched from '@/components/PapersFetched';
-import SelectedPapers from '@/components/SelectedPapers';
-import PaperDetails from '@/components/PaperDetails';
-import type { Paper, SummaryData } from '@/types/paper';
+import SelectedSources from '@/components/SelectedSources';
+import SourceDetails from '@/components/SourceDetails';
+import type { Source } from '@/types/source';
+import type { Chat, ChatMessage, ChatWithMessages } from '@/types/chat';
 import ChatInterface from '@/components/ChatInterface';
-import { loadProject, saveProject, createNewProject } from '@/lib/projectStorage';
+import { loadProject, saveProject, createNewProject, addSource as addSourceAPI, checkSourceStatus, createContent, listContent, deleteContent, checkContentStatus, listChats, getChat, createChat, deleteChat } from '@/lib/projectStorage';
 import type { Project, GeneratedContent } from '@/types/project';
 import ProductSwitcher from '@/components/ProductSwitcher';
 
@@ -41,348 +41,331 @@ export default function ProjectPage() {
     const [isAddSourcesOpen, setIsAddSourcesOpen] = useState(false);
     const [isStudioModalOpen, setIsStudioModalOpen] = useState(false);
     const [isCustomizeTextOpen, setIsCustomizeTextOpen] = useState(false);
-    const [isCustomizeAudioOpen, setIsCustomizeAudioOpen] = useState(false);
     const [isCustomizeImageOpen, setIsCustomizeImageOpen] = useState(false);
     const [selectedStudioTool, setSelectedStudioTool] = useState<string>('');
-    const [isSourceDropdownOpen, setIsSourceDropdownOpen] = useState(false);
-    const [isResearchTypeDropdownOpen, setIsResearchTypeDropdownOpen] = useState(false);
-    const [selectedSource, setSelectedSource] = useState('VeriSci');
-    const [selectedResearchType, setSelectedResearchType] = useState('Deep Research');
-    const [isResearching, setIsResearching] = useState(false);
-    const [showResults, setShowResults] = useState(false);
     const [searchQuery, setSearchQuery] = useState('');
-    const [fetchedPapers, setFetchedPapers] = useState<Paper[]>([]);
-    const [importedPapers, setImportedPapers] = useState<Paper[] | null>(null);
-    const [summaryData, setSummaryData] = useState<SummaryData | null>(null);
-    const [selectedPaper, setSelectedPaper] = useState<Paper | null>(null);
-    const [isPapersExpanded, setIsPapersExpanded] = useState(false);
+    const [sources, setSources] = useState<Source[] | null>(null);
+    const [selectedSource, setSelectedSource] = useState<Source | null>(null);
     const [leftPanelCollapsed, setLeftPanelCollapsed] = useState(false);
     const [generatedContent, setGeneratedContent] = useState<GeneratedContent[]>([]);
     const [selectedContent, setSelectedContent] = useState<GeneratedContent | null>(null);
+    const [currentChat, setCurrentChat] = useState<ChatWithMessages | null>(null);
+    const [chatList, setChatList] = useState<Chat[]>([]);
+    const [showChatHistory, setShowChatHistory] = useState(false);
+    const [errorMessage, setErrorMessage] = useState<string | null>(null);
     const isCreatingProject = useRef(false);
-    const searchInputRef = useRef<HTMLTextAreaElement>(null);
+    const pollingTimers = useRef<Record<string, NodeJS.Timeout>>({});
+    const contentPollingTimers = useRef<Record<string, NodeJS.Timeout>>({});
 
-    const [isGeneratingSummary, setIsGeneratingSummary] = useState(false);
+    // Auto-dismiss error toast
+    useEffect(() => {
+        if (!errorMessage) return;
+        const timer = setTimeout(() => setErrorMessage(null), 5000);
+        return () => clearTimeout(timer);
+    }, [errorMessage]);
 
-    // Mock summary generator based on papers
-    const generateDynamicSummary = (papers: Paper[]) => {
-        if (papers.length === 0) {
-            return {
-                title: "No sources",
-                summary: "Add research reports or video transcripts to generate a synthesized intelligence report.",
-                questions: ["How do I add sources?", "What can the assistant do?"]
-            };
+    // Load chat list when project loads
+    useEffect(() => {
+        if (projectId && projectId !== 'new') {
+            listChats(projectId).then(setChatList);
+        }
+    }, [projectId]);
+
+    // Poll for source processing status
+    const startPolling = useCallback((sourceId: string) => {
+        // Clear any existing timer for this source
+        if (pollingTimers.current[sourceId]) {
+            clearInterval(pollingTimers.current[sourceId]);
         }
 
-        if (!isFundBuzz) {
-            return {
-                title: papers.length > 1 ? `Synthesis: ${papers.length} Sources` : papers[0].title,
-                summary: `We've synthesized the ${papers.length} imported research paper(s). The collection focuses on correlated trends across your library, providing a unified view of the current investigative landscape.`,
-                questions: ["What are the key findings?", "How does this relate to previous work?"]
-            };
+        pollingTimers.current[sourceId] = setInterval(async () => {
+            try {
+                const updated = await checkSourceStatus(projectId, sourceId);
+                if (updated.processingStatus === 'completed' || updated.processingStatus === 'failed') {
+                    clearInterval(pollingTimers.current[sourceId]);
+                    delete pollingTimers.current[sourceId];
+                }
+                // Update the source in state
+                setSources(prev => {
+                    if (!prev) return prev;
+                    return prev.map(s => s.id === sourceId ? updated : s);
+                });
+            } catch (error) {
+                console.error('Polling error:', error);
+                clearInterval(pollingTimers.current[sourceId]);
+                delete pollingTimers.current[sourceId];
+            }
+        }, 3000);
+    }, [projectId]);
+
+    // Poll for content processing status
+    const startContentPolling = useCallback((contentId: string) => {
+        if (contentPollingTimers.current[contentId]) {
+            clearInterval(contentPollingTimers.current[contentId]);
         }
 
-        const titles = papers.map(p => p.title).join(", ");
-        const websiteCount = papers.filter(p => p.sourceType === 'text').length;
-        const videoCount = papers.filter(p => p.sourceType === 'video').length;
+        contentPollingTimers.current[contentId] = setInterval(async () => {
+            try {
+                const updated = await checkContentStatus(projectId, contentId);
+                if (!updated.isLoading) {
+                    clearInterval(contentPollingTimers.current[contentId]);
+                    delete contentPollingTimers.current[contentId];
+                }
 
-        // Logic to customize based on common keywords in my mocks
-        let focus = "investment intelligence and portfolio trends";
-        let questions = [
-            `How do the findings in "${papers[0]?.title || 'these sources'}" impact our Q2 strategy?`,
-            "What are the top 3 compliance-safe marketing hooks we can extract?",
-            "Can we consolidate these trends into a single LinkedIn thread?"
-        ];
+                if (updated.processingStatus === 'failed') {
+                    setErrorMessage('Content generation failed. Please try again.');
+                    setGeneratedContent(prev => prev.filter(c => c.id !== contentId));
+                    setSelectedContent(prev => prev?.id === contentId ? null : prev);
+                    return;
+                }
 
-        if (titles.includes("ESG")) {
-            focus = "ESG integration and sustainable impact";
-            questions = [
-                "What are the primary compliance risks identified in the ESG disclosures?",
-                "How do these sustainability metrics compare to our current green fund narrative?",
-                "Extract 3 key 'Impact' proof points for our investor marketing deck."
-            ];
-        } else if (titles.includes("AI")) {
-            focus = "AI-driven active management and technology shifts";
-            questions = [
-                "What are the ethical concerns regarding 'Alpha' generation via LLMs?",
-                "Does the reporting suggest high-frequency trading is stabilizing or adding volatility?",
-                "Summarize the impact of AI on mutual fund expense ratios for a client summary."
-            ];
-        } else if (titles.includes("Bond") || titles.includes("Yield")) {
-            focus = "fixed-income yields and market resilience";
-            questions = [
-                "Position these 10-year yield highs as an opportunity for retail investors.",
-                "How do these bond yields affect our 'Staying Power' narrative?",
-                "What are the primary interest rate risks identified for short-duration bonds?"
-            ];
-        }
+                setGeneratedContent(prev =>
+                    prev.map(c => c.id === contentId ? updated : c)
+                );
+                // Keep selectedContent in sync so detail view updates
+                setSelectedContent(prev =>
+                    prev?.id === contentId ? updated : prev
+                );
+            } catch (error) {
+                console.error('Content polling error:', error);
+                clearInterval(contentPollingTimers.current[contentId]);
+                delete contentPollingTimers.current[contentId];
+            }
+        }, 3000);
+    }, [projectId]);
 
-        const summarizedSourceText = papers.length > 1
-            ? `Synthesizing intelligence from ${websiteCount} report(s) and ${videoCount} video transcript(s), this unified analysis highlights a critical pivot towards ${focus}. ${papers[0].title} and related sources suggest that current market sentiment for 2026 is increasingly prioritizing institutional resilience; by correlating cross-platform benchmarks—including specific fund performance metrics and expert video insights—we identify a 12% shift in retail interest toward specialized sectors, necessitating immediate message alignment in our upcoming marketing collateral.`
-            : `Our analysis of ${papers[0].title} reveals a concentrated focus on ${focus}. The data suggests that current market sentiment for 2026 is pivoting towards institutional resilience. Key benchmarks found in your source highlight a 12% shift in retail interest towards specialized fund sectors, providing critical insights for tailoring your upcoming marketing assets and ensuring message alignment with documented fund performance.`;
-
-        return {
-            title: papers.length > 1 ? `Synthesis: ${papers.length} Sources Analyzed` : `Intelligence Report: ${papers[0].title}`,
-            summary: summarizedSourceText,
-            questions: questions
+    // Clean up polling on unmount
+    useEffect(() => {
+        const sourceTimers = pollingTimers.current;
+        const contentTimers = contentPollingTimers.current;
+        return () => {
+            Object.values(sourceTimers).forEach(clearInterval);
+            Object.values(contentTimers).forEach(clearInterval);
         };
-    };
+    }, []);
 
     // Load project on mount
     useEffect(() => {
-        if (projectId === 'new') {
-            // Prevent double creation in Strict Mode
-            if (isCreatingProject.current) return;
-            isCreatingProject.current = true;
-
-            // Create a new project and redirect to its ID
-            const newProject = createNewProject();
-            router.replace(`/project/${newProject.id}`);
-        } else {
-            // Load existing project
-            const loaded = loadProject(projectId);
-            if (loaded) {
-                setProject(loaded);
-                setProjectTitle(loaded.title);
-                setSearchQuery(loaded.searchQuery);
-                setImportedPapers(loaded.importedPapers.length > 0 ? loaded.importedPapers : null);
-                setSummaryData(loaded.summaryData);
-                setGeneratedContent(loaded.generatedContent || []);
+        const init = async () => {
+            if (projectId === 'new') {
+                if (isCreatingProject.current) return;
+                isCreatingProject.current = true;
+                const newProject = await createNewProject();
+                router.replace(`/project/${newProject.id}`);
             } else {
-                // Project doesn't exist, redirect to dashboard
-                router.replace('/dashboard');
-            }
-        }
-    }, [projectId, router]);
+                const loaded = await loadProject(projectId);
+                if (loaded) {
+                    setProject(loaded);
+                    setProjectTitle(loaded.title);
+                    setSearchQuery(loaded.searchQuery);
+                    setSources(loaded.sources.length > 0 ? loaded.sources : null);
 
-    // Auto-save project when data changes
+                    // Resume polling for any sources still processing
+                    loaded.sources
+                        .filter(s => s.processingStatus === 'processing')
+                        .forEach(s => startPolling(s.id));
+                } else {
+                    router.replace('/dashboard');
+                }
+            }
+        };
+        init();
+    }, [projectId, router, startPolling]);
+
+    // Auto-save project when data changes (debounced)
+    // Sources and content are managed via their own APIs
     useEffect(() => {
-        if (project && projectId !== 'new') {
+        if (!project || projectId === 'new') return;
+
+        const timeout = setTimeout(() => {
             const updatedProject: Project = {
                 ...project,
                 title: projectTitle,
                 searchQuery,
-                importedPapers: importedPapers || [],
-                summaryData,
-                generatedContent,
+                sources: [],
+                summaryData: null,
+                generatedContent: [],
             };
             saveProject(updatedProject);
-        }
-    }, [project, projectId, projectTitle, searchQuery, importedPapers, summaryData, generatedContent]);
+        }, 500);
 
-    const handleSearchKeyDown = async (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-        if (e.key === 'Enter' && !e.shiftKey) {
-            e.preventDefault();
-            const query = e.currentTarget.value.trim();
-            if (!query) return;
+        return () => clearTimeout(timeout);
+    }, [project, projectId, projectTitle, searchQuery]);
 
-            setSearchQuery(query);
-            setIsResearching(true);
-            setShowResults(false);
-            setIsPapersExpanded(false); // Reset expansion on new search
+    // Add a source via the API and start polling
+    const handleAddSource = async (input: { url: string; type: string; title: string }) => {
+        try {
+            const source = await addSourceAPI(projectId, input);
+            setSources(prev => [source, ...(prev || [])]);
 
-            try {
-                const response = await fetch('/api/search-papers', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ query, limit: 6 }),
-                });
-
-                if (!response.ok) {
-                    const errorData = await response.json();
-                    if (response.status === 429) {
-                        alert('Rate limit exceeded. Please wait a moment and try again.');
-                    } else {
-                        alert(`Failed to search papers: ${errorData.error || 'Unknown error'}`);
-                    }
-                    return;
-                }
-
-                const { papers } = await response.json();
-                setFetchedPapers(papers);
-                setShowResults(true);
-            } catch (error) {
-                console.error('Error fetching papers:', error);
-                alert('Failed to search papers. Please check your internet connection and try again.');
-            } finally {
-                setIsResearching(false);
+            // Start polling if the source is being processed
+            if (source.processingStatus === 'processing') {
+                startPolling(source.id);
             }
+        } catch (error) {
+            console.error('Failed to add source:', error);
         }
     };
 
-    const handleTriggerSummaryRegeneration = async (papers: Paper[]) => {
-        setIsGeneratingSummary(true);
-        // Simulate "AI thinking" delay
-        setTimeout(() => {
-            const newSummary = generateDynamicSummary(papers);
-            setSummaryData(newSummary);
-            setIsGeneratingSummary(false);
-        }, 1500);
-    };
-
-    const handleImport = async (selectedPapers: Paper[]) => {
-        const current = importedPapers || [];
-        const newPapers = selectedPapers.filter(p => !current.some(existing => existing.id === p.id));
-        const allPapers = [...current, ...newPapers];
-
-        setImportedPapers(allPapers);
-        setShowResults(false);
-        setIsPapersExpanded(false);
-
-        handleTriggerSummaryRegeneration(allPapers);
-    };
-
-    const handlePaperClick = (paper: Paper) => {
-        setSelectedPaper(paper);
+    const handleSourceClick = (source: Source) => {
+        setSelectedSource(source);
     };
 
     const handleBackFromDetails = () => {
-        setSelectedPaper(null);
+        setSelectedSource(null);
     };
 
-    const handleRemovePaper = async (paperId: string) => {
-        if (!importedPapers) return;
-
-        const updatedPapers = importedPapers.filter(p => p.id !== paperId);
-        setImportedPapers(updatedPapers);
-
-        if (updatedPapers.length === 0) {
-            setSummaryData(null);
-            return;
+    const handleRemoveSource = async (sourceId: string) => {
+        if (!sources) return;
+        // Stop polling if active
+        if (pollingTimers.current[sourceId]) {
+            clearInterval(pollingTimers.current[sourceId]);
+            delete pollingTimers.current[sourceId];
         }
-
-        handleTriggerSummaryRegeneration(updatedPapers);
+        const updatedSources = sources.filter(s => s.id !== sourceId);
+        setSources(updatedSources.length > 0 ? updatedSources : null);
     };
 
-    // Handle search icon click in collapsed sidebar
-    const handleSearchIconClick = () => {
+    const handleSourceIconClick = (source: Source) => {
         setLeftPanelCollapsed(false);
         setLeftPanelOpen(true);
-        setTimeout(() => {
-            searchInputRef.current?.focus();
-        }, 300); // Wait for animation to complete
+        setSelectedSource(source);
     };
 
-    // Handle paper icon click in collapsed sidebar
-    const handlePaperIconClick = (paper: Paper) => {
-        setLeftPanelCollapsed(false);
-        setLeftPanelOpen(true);
-        setSelectedPaper(paper);
-    };
+    const handleNewChat = useCallback(async () => {
+        setCurrentChat(null);
+        setShowChatHistory(false);
+    }, []);
 
-    const handleSaveToNote = (content: string) => {
-        const newItem: GeneratedContent = {
-            id: Date.now().toString(),
-            title: 'Research Note',
-            type: 'note',
-            content: content,
-            createdAt: new Date(),
-            isLoading: false
-        };
-        setGeneratedContent(prev => [newItem, ...prev]);
+    const handleLoadChat = useCallback(async (chatId: string) => {
+        try {
+            const chat = await getChat(projectId, chatId);
+            setCurrentChat(chat);
+            setShowChatHistory(false);
+        } catch (error) {
+            console.error('Failed to load chat:', error);
+        }
+    }, [projectId]);
+
+    const handleDeleteChat = useCallback(async (chatId: string) => {
+        try {
+            await deleteChat(projectId, chatId);
+            setChatList(prev => prev.filter(c => c.id !== chatId));
+            if (currentChat?.id === chatId) {
+                setCurrentChat(null);
+            }
+        } catch (error) {
+            console.error('Failed to delete chat:', error);
+        }
+    }, [projectId, currentChat?.id]);
+
+    const handleChatCreated = useCallback((chat: ChatWithMessages) => {
+        setCurrentChat(chat);
+        setChatList(prev => [chat, ...prev]);
+    }, []);
+
+    const handleMessagesUpdated = useCallback((messages: ChatMessage[]) => {
+        setCurrentChat(prev => prev ? { ...prev, messages } : null);
+    }, []);
+
+    const handleSaveToNote = async (content: string) => {
+        try {
+            const newContent = await createContent(projectId, {
+                action: 'note',
+                content,
+                sourceId: selectedSource?.id,
+            });
+            setGeneratedContent(prev => [newContent, ...prev]);
+        } catch (error) {
+            console.error('Failed to save note:', error);
+        }
     };
 
     const handleAddToSources = (content: GeneratedContent) => {
-        const newPaper: Paper = {
+        const newSource: Source = {
             id: `${content.id}-${Date.now()}`,
             title: content.title,
             authors: "Generated Content",
             year: new Date().getFullYear(),
-            abstract: content.content || "",
-            badges: [{ id: 'gen', label: 'AI Generated', color: 'bg-green-500/10 text-green-400', icon: 'sparkles' }],
-            sourceType: content.type
+            type: content.type as Source['type'],
+            content: content.content,
+            processingStatus: 'completed',
+            metadata: {},
+            createdAt: new Date(),
         };
-        const updatedPapers = [newPaper, ...(importedPapers || [])];
-        setImportedPapers(updatedPapers);
-        handleTriggerSummaryRegeneration(updatedPapers);
+        setSources(prev => [newSource, ...(prev || [])]);
     };
 
-    const generateStudioText = (papers: Paper[], format: string, layout: string[], focus: string, boosts: string[]) => {
-        const keywords = papers.map(p => p.title).join(' ');
-        const mainTopic = papers[0]?.title || 'market trends';
-
-        let content = '';
-
-        // Simple logic to map layout slots to source-based content
-        layout.forEach((slot, index) => {
-            const cleanSlot = slot.replace(/\[.*?\]/g, '').replace(/Slide \d+:/g, '').trim();
-
-            if (format === 'Thread Pack') {
-                if (index === 0) content += `🧵 NEW RESEARCH: Why the consensus on ${mainTopic} is shifting. ${focus ? `Focusing on ${focus}.` : ''}\n\n`;
-                else if (index === 1) content += `1/ The numbers don't lie. Data from ${papers.length} sources shows a critical pivot. "Institutional resilience is no longer optional."\n\n`;
-                else if (index === 2) content += `2/ Our internal analysis identifies a 12% shift in retail interest. This isn't just a trend; it's a structural realignment. ${boosts.includes('Summarize the core points.') ? 'Synthesizing the core physics here.' : ''}\n\n`;
-                else content += `3/ Bottom line: Align your messaging with performance data now to capture this 2026 momentum. 📉\n\n`;
-            } else if (format === 'Carousel Copy') {
-                content += `SLIDE ${index + 1}: ${cleanSlot}\n`;
-                if (index === 0) content += `> Headline: The Future of ${mainTopic}\n\n`;
-                else if (index === 1) content += `> Context: Most investors believe the 2026 cycle is fixed. Our library proves otherwise.\n\n`;
-                else if (index === 2) content += `> The Data: Correlated benchmarks suggest institutional alpha is migrating to specialized sectors.\n\n`;
-                else content += `> Action: Download our full intelligence report via the link in bio. 🚀\n\n`;
-            } else if (format === 'Fact Card') {
-                content += `${cleanSlot.toUpperCase()}\n`;
-                if (index === 0) content += `📊 STAT: 12% increase in retail interest for ${mainTopic} sectors.\n\n`;
-                else if (index === 1) content += `🔍 INSIGHT: "Institutional resilience is the lead indicator for 2026 staying power."\n\n`;
-                else content += `✅ SOURCE: Cross-correlated transcript analysis from your project library.\n\n`;
-            } else {
-                content += `- ${cleanSlot}: Analysis of ${mainTopic} suggests unified growth in ${focus || 'current sectors'}.\n`;
-            }
-        });
-
-        if (boosts.includes('Provide practical takeaways.')) {
-            content += `\n💡 PRACTICAL TAKEAWAY: Reposition marketing hooks toward "Algorithm-Driven Active Management" to align with these findings.`;
+    const handleDeleteContent = async (id: string) => {
+        try {
+            await deleteContent(projectId, id);
+            setGeneratedContent(prev => prev.filter(item => item.id !== id));
+        } catch (error) {
+            console.error('Failed to delete content:', error);
         }
-
-        return content.trim();
     };
 
     const handleUpdateContentStatus = (id: string, status: GeneratedContent['complianceStatus']) => {
-        setGeneratedContent(prev => {
-            const updated = prev.map(item =>
+        setGeneratedContent(prev =>
+            prev.map(item =>
                 item.id === id ? { ...item, complianceStatus: status } : item
-            );
-
-            // Persist to storage
-            if (project) {
-                const updatedProject = { ...project, generatedContent: updated };
-                saveProject(updatedProject);
-            }
-
-            return updated;
-        });
+            )
+        );
     };
 
     const handleUpdateContentTitle = (id: string, newTitle: string) => {
-        setGeneratedContent(prev => {
-            const updated = prev.map(item =>
+        setGeneratedContent(prev =>
+            prev.map(item =>
                 item.id === id ? { ...item, title: newTitle } : item
-            );
-
-            if (project) {
-                const updatedProject = { ...project, generatedContent: updated };
-                saveProject(updatedProject);
-            }
-
-            return updated;
-        });
+            )
+        );
     };
+
+    // Load content when selectedSource changes
+    useEffect(() => {
+        if (!project || projectId === 'new') return;
+        if (!selectedSource) {
+            setGeneratedContent([]);
+            return;
+        }
+        listContent(projectId, selectedSource.id).then(items => {
+            setGeneratedContent(items);
+            // Resume polling for any content still processing
+            items.filter(c => c.isLoading).forEach(c => startContentPolling(c.id));
+        });
+    }, [project, projectId, selectedSource, startContentPolling]);
 
     // Calculate left panel width based on state
     const leftPanelWidth = leftPanelCollapsed
         ? 64
-        : (selectedPaper || isPapersExpanded) ? 500 : 384; // 64px collapsed, match Studio width
+        : selectedSource ? 500 : 384;
 
     return (
         <div className="h-screen bg-slate-900 text-white flex flex-col overflow-hidden">
+            {/* Error Toast */}
+            {errorMessage && (
+                <motion.div
+                    initial={{ opacity: 0, y: -20 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: -20 }}
+                    className="fixed top-4 left-1/2 -translate-x-1/2 z-[100] flex items-center gap-3 px-4 py-3 rounded-lg bg-red-600 text-white shadow-lg"
+                >
+                    <AlertCircle className="w-5 h-5 shrink-0" />
+                    <span className="text-sm font-medium">{errorMessage}</span>
+                    <button
+                        onClick={() => setErrorMessage(null)}
+                        className="p-0.5 rounded hover:bg-red-500 transition-colors"
+                    >
+                        <X className="w-4 h-4" />
+                    </button>
+                </motion.div>
+            )}
             {/* Add Sources Modal */}
             <AddSourcesModal
                 isOpen={isAddSourcesOpen}
                 onClose={() => setIsAddSourcesOpen(false)}
-                currentSourceCount={importedPapers?.length || 0}
-                onAddSource={(source) => {
-                    const updatedPapers = [source, ...(importedPapers || [])];
-                    setImportedPapers(updatedPapers);
-                    handleTriggerSummaryRegeneration(updatedPapers);
-                }}
+                currentSourceCount={sources?.length || 0}
+                onAddSource={handleAddSource}
             />
             {/* Studio Modal */}
             <StudioModal
@@ -394,91 +377,69 @@ export default function ProjectPage() {
             <CustomizeTextModal
                 isOpen={isCustomizeTextOpen}
                 onClose={() => setIsCustomizeTextOpen(false)}
-                onGenerate={(title, format, layout, focus, boosts) => {
-                    const tempTitle = title || `${importedPapers?.[0]?.title.substring(0, 35)}...`;
-                    const newItem: GeneratedContent = {
-                        id: Date.now().toString(),
-                        title: tempTitle,
-                        type: 'text',
-                        format: format,
-                        createdAt: new Date(),
-                        isLoading: true,
-                        complianceStatus: 'Draft'
-                    };
-                    setGeneratedContent(prev => [newItem, ...prev]);
-
-                    // Simulate generation
-                    setTimeout(() => {
-                        const generatedText = generateStudioText(importedPapers || [], format, layout, focus, boosts);
-                        // Generate a more concise title based on content - no format prefix
-                        const conciseTitle = focus ? (focus.charAt(0).toUpperCase() + focus.slice(1).substring(0, 35)) : (importedPapers?.[0]?.title.substring(0, 35) || 'Market Analysis');
-
-                        setGeneratedContent(prev =>
-                            prev.map(item =>
-                                item.id === newItem.id
-                                    ? { ...item, title: conciseTitle, content: generatedText, isLoading: false }
-                                    : item
-                            )
-                        );
-                    }, 2500);
-                }}
-            />
-            {/* Customize Audio Modal */}
-            <CustomizeAudioModal
-                isOpen={isCustomizeAudioOpen}
-                onClose={() => setIsCustomizeAudioOpen(false)}
-                onGenerate={(title, voice) => {
-                    const newItem: GeneratedContent = {
-                        id: Date.now().toString(),
-                        title: title,
-                        type: 'audio',
-                        format: voice,
-                        createdAt: new Date(),
-                        isLoading: true
-                    };
-                    setGeneratedContent(prev => [newItem, ...prev]);
-
-                    // Simulate loading for 3 seconds
-                    setTimeout(() => {
-                        setGeneratedContent(prev =>
-                            prev.map(item =>
-                                item.id === newItem.id
-                                    ? { ...item, isLoading: false }
-                                    : item
-                            )
-                        );
-                    }, 3000);
+                sourceType={selectedSource?.type}
+                hasTranscript={!!selectedSource?.transcript}
+                onGenerate={async (_title, format, layout, focus, boosts, contextSource) => {
+                    try {
+                        const useTranscript = contextSource === 'transcript' && selectedSource?.transcript;
+                        const newContent = await createContent(projectId, {
+                            action: 'text',
+                            sourceId: selectedSource?.id,
+                            promptInput: {
+                                format,
+                                language: 'English',
+                                length: 'Default',
+                                vibe: '',
+                                audience: '',
+                                layout,
+                                focus,
+                                boosts,
+                                includeCitations: false,
+                                sourceContext: selectedSource ? (useTranscript
+                                    ? { title: selectedSource.title, content: selectedSource.transcript }
+                                    : { title: selectedSource.title, summary: selectedSource.summary, content: selectedSource.content }
+                                ) : undefined,
+                            },
+                        });
+                        setGeneratedContent(prev => [newContent, ...prev]);
+                        if (newContent.isLoading) {
+                            startContentPolling(newContent.id);
+                        }
+                    } catch (error) {
+                        console.error('Failed to generate text:', error);
+                    }
                 }}
             />
             {/* Customize Image Modal */}
             <CustomizeImageModal
                 isOpen={isCustomizeImageOpen}
                 onClose={() => setIsCustomizeImageOpen(false)}
-                onGenerate={(title, style) => {
-                    const newItem: GeneratedContent = {
-                        id: (Date.now()).toString(),
-                        title: title,
-                        type: 'image',
-                        format: style,
-                        createdAt: new Date(),
-                        isLoading: true
-                    };
-
-                    setGeneratedContent(prev => [newItem, ...prev]);
-
-                    // Simulate loading for 3 seconds
-                    setTimeout(() => {
-                        setGeneratedContent(prev =>
-                            prev.map(item =>
-                                newItem.id === item.id
-                                    ? { ...item, isLoading: false }
-                                    : item
-                            )
-                        );
-                    }, 3000);
+                onGenerate={async (format, style, includeText, prompt, imageCount) => {
+                    try {
+                        const newContent = await createContent(projectId, {
+                            action: 'image',
+                            sourceId: selectedSource?.id,
+                            promptInput: {
+                                format,
+                                style,
+                                includeText,
+                                prompt,
+                                imageCount,
+                                sourceContext: selectedSource ? {
+                                    title: selectedSource.title,
+                                    summary: selectedSource.summary,
+                                } : undefined,
+                            },
+                        });
+                        setGeneratedContent(prev => [newContent, ...prev]);
+                        if (newContent.isLoading) {
+                            startContentPolling(newContent.id);
+                        }
+                    } catch (error) {
+                        console.error('Failed to generate image:', error);
+                    }
                 }}
             />
-            {/* Header */}
             {/* Header */}
             <header className={`h-16 border-b flex items-center justify-between px-6 z-10 transition-colors bg-[#0f172a] border-white/10`}>
                 <div className="flex items-center gap-6">
@@ -527,20 +488,18 @@ export default function ProjectPage() {
             <div className="flex-1 flex overflow-hidden">
 
                 {/* Left Column: Sources */}
-                {/* Left Column: Research Assistant */}
                 <motion.div
                     initial={false}
                     animate={{
                         width: leftPanelOpen ? leftPanelWidth : 0,
                         opacity: leftPanelOpen ? 1 : 0,
-                        backgroundColor: isFundBuzz && leftPanelOpen && !leftPanelCollapsed ? '#ffffff' : '#0f172a' // White for full Fund Buzz panel
+                        backgroundColor: isFundBuzz && leftPanelOpen && !leftPanelCollapsed ? '#ffffff' : '#0f172a'
                     }}
                     className={`border-r ${isFundBuzz ? 'border-slate-200' : 'border-white/10'} flex flex-col relative transition-colors duration-300`}
                 >
                     {leftPanelCollapsed ? (
                         /* Icon-only Sidebar */
                         <div className={`w-16 h-full flex flex-col py-4 px-3 space-y-4 ${isFundBuzz ? 'bg-white border-r border-slate-200' : 'bg-slate-900'}`}>
-                            {/* Expand Button */}
                             <button
                                 onClick={() => setLeftPanelCollapsed(false)}
                                 className={`p-2.5 rounded-lg transition-colors group relative ${isFundBuzz ? 'hover:bg-slate-100 text-slate-500 hover:text-slate-900' : 'hover:bg-white/10 text-gray-400 hover:text-white'}`}
@@ -549,7 +508,6 @@ export default function ProjectPage() {
                                 <PanelRightClose className="w-5 h-5" />
                             </button>
 
-                            {/* Add Sources Icon - Moved Up */}
                             <button
                                 onClick={() => setIsAddSourcesOpen(true)}
                                 className={`p-2.5 rounded-lg transition-colors group relative ${isFundBuzz ? 'bg-blue-600 hover:bg-blue-700 text-white shadow-sm' : 'bg-blue-600 hover:bg-blue-700 text-white shadow-sm'}`}
@@ -558,51 +516,23 @@ export default function ProjectPage() {
                                 <Plus className="w-5 h-5" />
                             </button>
 
-                            {/* Divider for Sources */}
-                            {importedPapers && importedPapers.length > 0 && (
+                            {sources && sources.length > 0 && (
                                 <div className={`border-t ${isFundBuzz ? 'border-slate-200' : 'border-white/10'} my-2`} />
                             )}
 
-                            {/* Selected Papers Icons */}
-                            {importedPapers?.map((paper) => (
+                            {sources?.map((source) => (
                                 <button
-                                    key={paper.id}
-                                    onClick={() => handlePaperIconClick(paper)}
+                                    key={source.id}
+                                    onClick={() => handleSourceIconClick(source)}
                                     className={`p-2.5 rounded-lg transition-colors group relative ${isFundBuzz ? 'hover:bg-slate-100' : 'hover:bg-white/10'}`}
-                                    title={paper.title}
+                                    title={source.title}
                                 >
-                                    {paper.sourceType === 'website' ? (
-                                        <div className="relative">
-                                            <Globe className={`w-5 h-5 ${isFundBuzz ? 'text-black' : 'text-white'}`} />
-                                            {!isFundBuzz && <Sparkles className="w-2.5 h-2.5 absolute -bottom-0.5 -right-0.5 stroke-[3] text-white fill-blue-950" />}
-                                        </div>
-                                    ) : paper.sourceType === 'text' ? (
-                                        <div className="relative">
-                                            <Globe className={`w-5 h-5 ${isFundBuzz ? 'text-black' : 'text-blue-400'}`} />
-                                            {!isFundBuzz && <Sparkles className="w-2.5 h-2.5 absolute -bottom-0.5 -right-0.5 stroke-[3] text-blue-400 fill-blue-950" />}
-                                        </div>
-                                    ) : paper.sourceType === 'audio' ? (
-                                        <div className="relative">
-                                            <Mic className="w-5 h-5 text-pink-500" />
-                                            {!isFundBuzz && <Sparkles className="w-2.5 h-2.5 text-pink-500 absolute -top-1 -right-1 fill-pink-950 stroke-[3]" />}
-                                        </div>
-                                    ) : paper.sourceType === 'image' ? (
-                                        <div className="relative">
-                                            <Image className="w-5 h-5 text-purple-500" />
-                                            {!isFundBuzz && <Sparkles className="w-2.5 h-2.5 text-purple-500 absolute -top-1 -right-1 fill-purple-950 stroke-[3]" />}
-                                        </div>
-                                    ) : paper.sourceType === 'video' ? (
-                                        <div className="relative">
-                                            <Youtube className={`w-5 h-5 text-red-500`} />
-                                            {!isFundBuzz && <Sparkles className="w-2.5 h-2.5 text-red-500 absolute -top-1 -right-1 fill-red-950 stroke-[3]" />}
-                                        </div>
-                                    ) : paper.sourceType === 'note' ? (
-                                        <div className="relative">
-                                            <FileText className={`w-5 h-5 ${isFundBuzz ? 'text-slate-600' : 'text-white'}`} />
-                                            {!isFundBuzz && <Sparkles className="w-2.5 h-2.5 absolute -bottom-0.5 -right-0.5 stroke-[3] text-white fill-slate-900" />}
-                                        </div>
+                                    {source.type === 'video' ? (
+                                        <Youtube className="w-5 h-5 text-red-500" />
+                                    ) : source.type === 'audio' ? (
+                                        <Mic className="w-5 h-5 text-pink-500" />
                                     ) : (
-                                        <FileText className={`w-5 h-5 ${isFundBuzz ? 'text-slate-600' : 'text-white'}`} />
+                                        <FileText className="w-5 h-5 text-purple-500" />
                                     )}
                                 </button>
                             ))}
@@ -631,136 +561,19 @@ export default function ProjectPage() {
                                 </button>
                             </div>
 
-                            {selectedPaper ? (
-                                selectedPaper.sourceType && ['text', 'audio', 'image', 'note'].includes(selectedPaper.sourceType) ? (
-                                    <TextContentDetails
-                                        content={{
-                                            id: selectedPaper.id,
-                                            title: selectedPaper.title,
-                                            type: selectedPaper.sourceType as any,
-                                            content: selectedPaper.abstract,
-                                            createdAt: new Date(),
-                                            isLoading: false
-                                        }}
-                                        onBack={handleBackFromDetails}
-                                    />
-                                ) : (
-                                    <PaperDetails paper={selectedPaper} onBack={handleBackFromDetails} />
-                                )
+                            {selectedSource ? (
+                                <SourceDetails source={selectedSource} onBack={handleBackFromDetails} />
                             ) : (
                                 <div className="px-4 pb-4 space-y-4 overflow-y-auto flex-1 scrollbar-hide">
-                                    {currentProduct !== 'fundbuzz' && (
-                                        <div className="bg-slate-800 border-2 border-blue-600 rounded-2xl p-4 space-y-4 relative z-20">
-                                            <div className="flex gap-3">
-                                                <Search className="w-5 h-5 text-gray-400 shrink-0 mt-1" />
-                                                <textarea
-                                                    ref={searchInputRef}
-                                                    placeholder="What would you like to research?"
-                                                    className="w-full bg-transparent border-none focus:ring-0 text-white placeholder-gray-400 text-lg p-0 resize-none h-[3.5rem] leading-relaxed"
-                                                    onKeyDown={handleSearchKeyDown}
-                                                />
-                                            </div>
-
-                                            <div className="flex items-center justify-between gap-2">
-                                                <div className="flex gap-2 overflow-visible">
-                                                    {/* Source Dropdown */}
-                                                    <div className="relative">
-                                                        <button
-                                                            onClick={() => setIsSourceDropdownOpen(!isSourceDropdownOpen)}
-                                                            className="flex items-center gap-2 px-3 py-1.5 bg-slate-900 rounded-full text-sm font-medium hover:bg-black/40 transition-colors border border-white/10 shrink-0"
-                                                        >
-                                                            {selectedSource === 'VeriSci' ? <Globe className="w-4 h-4" /> : <HardDrive className="w-4 h-4" />}
-                                                            {selectedSource}
-                                                            <ChevronDown className="w-3 h-3 text-gray-400" />
-                                                        </button>
-
-                                                        {isSourceDropdownOpen && (
-                                                            <div className="absolute top-full left-0 mt-2 w-40 bg-slate-800 border border-white/10 rounded-xl shadow-xl overflow-hidden z-30">
-                                                                <button
-                                                                    onClick={() => { setSelectedSource('VeriSci'); setIsSourceDropdownOpen(false); }}
-                                                                    className="w-full flex items-center gap-2 px-4 py-2 hover:bg-white/5 text-sm text-left"
-                                                                >
-                                                                    <Globe className="w-4 h-4" /> VeriSci
-                                                                </button>
-                                                                <button
-                                                                    onClick={() => { setSelectedSource('Drive'); setIsSourceDropdownOpen(false); }}
-                                                                    className="w-full flex items-center gap-2 px-4 py-2 hover:bg-white/5 text-sm text-left"
-                                                                >
-                                                                    <HardDrive className="w-4 h-4" /> Drive
-                                                                </button>
-                                                            </div>
-                                                        )}
-                                                    </div>
-
-                                                    {/* Research Type Dropdown */}
-                                                    <div className="relative">
-                                                        <button
-                                                            onClick={() => setIsResearchTypeDropdownOpen(!isResearchTypeDropdownOpen)}
-                                                            className="flex items-center gap-2 px-3 py-1.5 bg-slate-900 rounded-full text-sm font-medium hover:bg-black/40 transition-colors border border-white/10 whitespace-nowrap shrink-0"
-                                                        >
-                                                            <div className="relative">
-                                                                <Search className="w-3 h-3 absolute -top-0.5 -left-0.5" />
-                                                                <Globe className="w-4 h-4 ml-1" />
-                                                            </div>
-                                                            {selectedResearchType}
-                                                            <ChevronDown className="w-3 h-3 text-gray-400" />
-                                                        </button>
-
-                                                        {isResearchTypeDropdownOpen && (
-                                                            <div className="absolute top-full left-0 mt-2 w-48 bg-slate-800 border border-white/10 rounded-xl shadow-xl overflow-hidden z-30">
-                                                                <button
-                                                                    onClick={() => { setSelectedResearchType('Deep Research'); setIsResearchTypeDropdownOpen(false); }}
-                                                                    className="w-full flex items-center gap-2 px-4 py-2 hover:bg-white/5 text-sm text-left"
-                                                                >
-                                                                    <div className="relative">
-                                                                        <Search className="w-3 h-3 absolute -top-0.5 -left-0.5" />
-                                                                        <Globe className="w-4 h-4 ml-1" />
-                                                                    </div>
-                                                                    Deep Research
-                                                                </button>
-                                                                <button
-                                                                    onClick={() => { setSelectedResearchType('Fast Research'); setIsResearchTypeDropdownOpen(false); }}
-                                                                    className="w-full flex items-center gap-2 px-4 py-2 hover:bg-white/5 text-sm text-left"
-                                                                >
-                                                                    <Zap className="w-4 h-4" /> Fast Research
-                                                                </button>
-                                                            </div>
-                                                        )}
-                                                    </div>
-                                                </div>
-
-                                                <button className="p-2 bg-slate-900 rounded-full hover:bg-black/40 transition-colors border border-white/10 shrink-0">
-                                                    <ArrowRight className="w-4 h-4 text-gray-400" />
-                                                </button>
-                                            </div>
-                                        </div>
-                                    )}
-
-                                    {isResearching && (
-                                        <motion.div
-                                            initial={{ opacity: 0, y: 10 }}
-                                            animate={{ opacity: 1, y: 0 }}
-                                            exit={{ opacity: 0, y: 10 }}
-                                            className="flex items-center justify-center gap-3 py-4 text-blue-400"
-                                        >
-                                            <Loader2 className="w-5 h-5 animate-spin" />
-                                            <span className="font-medium">Researching Papers</span>
-                                        </motion.div>
-                                    )}
-
-                                    {showResults && (
-                                        <PapersFetched
-                                            papers={fetchedPapers}
-                                            onImport={handleImport}
-                                            onDelete={() => setShowResults(false)}
-                                            onPaperClick={handlePaperClick}
-                                            onExpandChange={setIsPapersExpanded}
+                                    {sources && sources.length > 0 && (
+                                        <SelectedSources
+                                            sources={sources}
+                                            onSourceClick={handleSourceClick}
+                                            onRemove={handleRemoveSource}
                                         />
                                     )}
 
-                                    {importedPapers && importedPapers.length > 0 && <SelectedPapers papers={importedPapers} onPaperClick={handlePaperClick} onRemove={handleRemovePaper} />}
-
-                                    {!showResults && !isResearching && (!importedPapers || importedPapers.length === 0) && (
+                                    {(!sources || sources.length === 0) && (
                                         <div className="mt-12 text-center px-4">
                                             <div className="w-12 h-12 mx-auto mb-3 text-gray-600">
                                                 <FileText className="w-full h-full opacity-20" />
@@ -793,31 +606,80 @@ export default function ProjectPage() {
                     initial={{ opacity: 0, y: 20 }}
                     animate={{ opacity: 1, y: 0 }}
                     transition={{ delay: 0.2 }}
-                    className="flex-1 flex flex-col min-w-0 min-h-0 relative"
+                    className="flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden relative"
                 >
                     <div className={`p-4 border-b flex items-center justify-between shrink-0 ${isFundBuzz ? 'bg-white border-slate-200 shadow-sm z-10' : 'bg-slate-900 border-white/5'}`}>
                         <div className="flex items-center gap-2">
                             <span className={`font-medium ${isFundBuzz ? 'text-slate-900' : 'text-gray-200'}`}>Research Assistant</span>
-                            <div className={`w-4 h-4 rounded-full border flex items-center justify-center text-[10px] ${isFundBuzz ? 'border-slate-300 text-slate-400' : 'border-white/20 text-gray-400'}`}>i</div>
                         </div>
                         <div className="flex items-center gap-2">
-                            <button className={`p-1.5 rounded-lg transition-colors ${isFundBuzz ? 'hover:bg-slate-100 text-slate-500' : 'hover:bg-white/5 text-gray-400'}`}>
-                                <Settings className="w-4 h-4" />
-                            </button>
-                            <button className={`p-1.5 rounded-lg transition-colors ${isFundBuzz ? 'hover:bg-slate-100 text-slate-500' : 'hover:bg-white/5 text-gray-400'}`}>
-                                <MoreVertical className="w-4 h-4" />
-                            </button>
+                            {selectedSource && (
+                                <>
+                                    <button
+                                        onClick={handleNewChat}
+                                        className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${isFundBuzz
+                                            ? 'bg-blue-600 hover:bg-blue-700 text-white shadow-sm'
+                                            : 'bg-white/10 hover:bg-white/20 text-white'
+                                            }`}
+                                        title="New Chat"
+                                    >
+                                        <MessageSquarePlus className="w-4 h-4" />
+                                        <span className="hidden md:inline">New Chat</span>
+                                    </button>
+                                    <div className="relative">
+                                        <button
+                                            onClick={() => setShowChatHistory(!showChatHistory)}
+                                            className={`p-1.5 rounded-lg transition-colors ${isFundBuzz ? 'hover:bg-slate-100 text-slate-500' : 'hover:bg-white/5 text-gray-400'}`}
+                                            title="Chat History"
+                                        >
+                                            <History className="w-4 h-4" />
+                                        </button>
+                                {showChatHistory && chatList.length > 0 && (
+                                    <div className={`absolute right-0 top-full mt-2 w-72 rounded-xl border shadow-xl z-50 max-h-80 overflow-y-auto scrollbar-hide ${isFundBuzz ? 'bg-white border-slate-200' : 'bg-slate-800 border-white/10'}`}>
+                                        {chatList.map(chat => (
+                                            <div
+                                                key={chat.id}
+                                                className={`flex items-center justify-between px-4 py-3 cursor-pointer transition-colors ${currentChat?.id === chat.id
+                                                    ? (isFundBuzz ? 'bg-blue-50' : 'bg-white/10')
+                                                    : (isFundBuzz ? 'hover:bg-slate-50' : 'hover:bg-white/5')
+                                                    }`}
+                                            >
+                                                <div
+                                                    className="flex-1 min-w-0"
+                                                    onClick={() => handleLoadChat(chat.id)}
+                                                >
+                                                    <p className={`text-sm font-medium truncate ${isFundBuzz ? 'text-slate-900' : 'text-white'}`}>
+                                                        {chat.title}
+                                                    </p>
+                                                    <p className={`text-xs ${isFundBuzz ? 'text-slate-400' : 'text-gray-500'}`}>
+                                                        {new Date(chat.updatedAt).toLocaleDateString()}
+                                                    </p>
+                                                </div>
+                                                <button
+                                                    onClick={(e) => { e.stopPropagation(); handleDeleteChat(chat.id); }}
+                                                    className={`p-1 rounded transition-colors flex-shrink-0 ml-2 ${isFundBuzz ? 'hover:bg-red-50 text-slate-400 hover:text-red-500' : 'hover:bg-red-500/20 text-gray-500 hover:text-red-400'}`}
+                                                >
+                                                    <Trash2 className="w-3.5 h-3.5" />
+                                                </button>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+                                    </div>
+                                </>
+                            )}
                         </div>
                     </div>
 
-                    <div className="flex-1 relative min-h-0 overflow-hidden flex flex-col items-center justify-center p-8">
-                        {importedPapers && summaryData ? (
+                    <div className={`flex-1 relative min-h-0 overflow-hidden flex flex-col ${sources && sources.length > 0 ? '' : 'items-center justify-center p-8'}`}>
+                        {sources && sources.length > 0 ? (
                             <ChatInterface
-                                selectedPaperCount={importedPapers.length}
-                                summaryData={summaryData}
+                                projectId={projectId}
+                                selectedSource={selectedSource}
                                 onSaveToNote={handleSaveToNote}
-                                isLoading={isGeneratingSummary}
-                                sourceTitles={importedPapers.map(p => p.title)}
+                                currentChat={currentChat}
+                                onChatCreated={handleChatCreated}
+                                onMessagesUpdated={handleMessagesUpdated}
                             />
                         ) : (
                             <div className="relative w-full max-w-md aspect-square flex items-center justify-center">
@@ -836,17 +698,15 @@ export default function ProjectPage() {
                                 <div className="absolute inset-0 rounded-full border border-dashed border-white/10 animate-[spin_60s_linear_infinite]" />
 
                                 {/* Nodes */}
-                                {/* Top: Research Assistant / Add Sources */}
                                 <div className="absolute top-0 left-1/2 -translate-x-1/2 -translate-y-1/2 flex flex-col items-center gap-2">
                                     <div className={`w-12 h-12 border rounded-full flex items-center justify-center transition-shadow ${isFundBuzz ? 'bg-white border-blue-500 shadow-lg shadow-blue-500/20' : 'bg-slate-900 border-blue-500/50 shadow-[0_0_15px_rgba(59,130,246,0.3)]'}`}>
-                                        {isFundBuzz ? <Plus className="w-5 h-5 text-blue-600" /> : <Search className="w-5 h-5 text-blue-400" />}
+                                        <Plus className={`w-5 h-5 ${isFundBuzz ? 'text-blue-600' : 'text-blue-400'}`} />
                                     </div>
                                     <span className={`text-xs font-semibold px-2 py-0.5 rounded-full border transition-colors ${isFundBuzz ? 'text-blue-900 bg-blue-50 border-blue-200 shadow-sm' : 'text-blue-300 bg-slate-900/80 border-blue-500/20'}`}>
-                                        {isFundBuzz ? 'Add Sources' : 'Research Assistant'}
+                                        Add Sources
                                     </span>
                                 </div>
 
-                                {/* Right: Generate Content */}
                                 <div className="absolute top-1/2 right-0 translate-x-1/2 -translate-y-1/2 flex flex-col items-center gap-2">
                                     <div className={`w-12 h-12 border rounded-full flex items-center justify-center transition-shadow ${isFundBuzz ? 'bg-white border-purple-500 shadow-lg shadow-purple-500/20' : 'bg-slate-900 border-purple-500/50 shadow-[0_0_15px_rgba(168,85,247,0.3)]'}`}>
                                         <Sparkles className={`w-5 h-5 ${isFundBuzz ? 'text-purple-600' : 'text-purple-400'}`} />
@@ -856,7 +716,6 @@ export default function ProjectPage() {
                                     </span>
                                 </div>
 
-                                {/* Bottom: Users Engage / Submit Compliance */}
                                 <div className="absolute bottom-0 left-1/2 -translate-x-1/2 translate-y-1/2 flex flex-col items-center gap-2">
                                     <div className={`w-12 h-12 border rounded-full flex items-center justify-center transition-shadow ${isFundBuzz ? 'bg-white border-pink-500 shadow-lg shadow-pink-500/20' : 'bg-slate-900 border-pink-500/50 shadow-[0_0_15px_rgba(236,72,153,0.3)]'}`}>
                                         {isFundBuzz ? <ShieldCheck className="w-5 h-5 text-pink-600" /> : <Users className="w-5 h-5 text-pink-400" />}
@@ -866,14 +725,12 @@ export default function ProjectPage() {
                                     </span>
                                 </div>
 
-                                {/* Left: Post on Socials */}
                                 <div className="absolute top-1/2 left-0 -translate-x-1/2 -translate-y-1/2 flex flex-col items-center gap-2">
                                     <div className={`w-12 h-12 border rounded-full flex items-center justify-center transition-shadow ${isFundBuzz ? 'bg-white border-green-500 shadow-lg shadow-green-500/20' : 'bg-slate-900 border-green-500/50 shadow-[0_0_15px_rgba(34,197,94,0.3)]'}`}>
                                         <Share2 className={`w-5 h-5 ${isFundBuzz ? 'text-green-600' : 'text-green-400'}`} />
                                     </div>
                                     <span className={`text-xs font-semibold px-2 py-0.5 rounded-full border transition-colors ${isFundBuzz ? 'text-white bg-green-600 border-green-500 shadow-sm' : 'text-green-300 bg-slate-900/80 border-green-500/20'}`}>Post on Socials</span>
                                 </div>
-
 
                             </div>
                         )}
@@ -892,9 +749,7 @@ export default function ProjectPage() {
                     className={`border-l transition-colors duration-300 flex flex-col relative ${isFundBuzz ? 'bg-white border-slate-200' : 'bg-slate-900 border-white/10'}`}
                 >
                     {!rightPanelOpen ? (
-                        /* Collapsed Sidebar */
                         <div className="flex flex-col items-center py-4 gap-4 h-full">
-                            {/* Expand Button */}
                             <button
                                 onClick={() => setRightPanelOpen(true)}
                                 className="p-2 hover:bg-white/10 rounded-lg text-gray-400 hover:text-white transition-colors"
@@ -905,7 +760,6 @@ export default function ProjectPage() {
 
                             <div className="w-8 h-px bg-white/10" />
 
-                            {/* Tools */}
                             <div className="flex flex-col gap-2">
                                 <button
                                     onClick={() => setIsCustomizeTextOpen(true)}
@@ -932,8 +786,6 @@ export default function ProjectPage() {
                             {generatedContent.length > 0 && (
                                 <>
                                     <div className="w-8 h-px bg-white/10" />
-
-                                    {/* Generated Content Icons */}
                                     <div className="flex flex-col gap-2 overflow-y-auto scrollbar-hide w-full items-center pb-4">
                                         {generatedContent.map(item => (
                                             <button
@@ -980,7 +832,6 @@ export default function ProjectPage() {
                             )}
                         </div>
                     ) : (
-                        /* Expanded Content */
                         selectedContent ? (
                             <TextContentDetails
                                 content={selectedContent}
@@ -989,7 +840,6 @@ export default function ProjectPage() {
                             />
                         ) : (
                             <>
-                                {/* Expanded Content Header */}
                                 <div className={`p-4 flex items-center justify-between border-b ${isFundBuzz ? 'bg-white border-slate-100 shadow-sm' : ''}`}>
                                     <h2 className={`font-semibold ${isFundBuzz ? 'text-slate-900' : 'text-gray-200'}`}>Content Studio</h2>
                                     <button onClick={() => setRightPanelOpen(false)} className={`p-1 rounded transition-colors ${isFundBuzz ? 'hover:bg-slate-100 text-slate-400' : 'hover:bg-white/5 text-gray-400'}`}>
@@ -998,7 +848,6 @@ export default function ProjectPage() {
                                 </div>
 
                                 <div className="px-4 pb-4 space-y-4 overflow-y-auto flex-1 scrollbar-hide pt-4">
-                                    {/* Studio Cards */}
                                     <div className="grid grid-cols-2 gap-2 mb-2">
                                         <button
                                             onClick={() => setIsCustomizeTextOpen(true)}
@@ -1011,9 +860,7 @@ export default function ProjectPage() {
                                             <span className={`text-xs font-medium ${isFundBuzz ? 'text-slate-700' : ''}`}>Text</span>
                                         </button>
                                         <button
-                                            onClick={() => {
-                                                setIsCustomizeImageOpen(true);
-                                            }}
+                                            onClick={() => setIsCustomizeImageOpen(true)}
                                             className={`w-full flex flex-col items-center justify-center p-3 rounded-lg transition-colors gap-2 group ${isFundBuzz ? 'bg-slate-50 border border-slate-100 hover:bg-slate-100' : 'bg-white/5 hover:bg-white/10'}`}
                                         >
                                             <div className="relative">
@@ -1024,35 +871,41 @@ export default function ProjectPage() {
                                         </button>
                                     </div>
 
-                                    {/* Divider after Studio */}
                                     <div className={`border-t mx-4 ${isFundBuzz ? 'border-slate-100' : 'border-white/10'}`}></div>
 
-                                    {/* Generated Content Section */}
-                                    {generatedContent.length > 0 && (
+                                    {selectedSource && generatedContent.length > 0 && (
                                         <div className="p-4 pb-2">
                                             <h2 className={`font-semibold ${isFundBuzz ? 'text-slate-900' : 'text-gray-200'}`}>Generated Content</h2>
                                         </div>
                                     )}
 
-                                    <div className="px-4 pb-4">
-                                        <ContentGenerated
-                                            items={generatedContent}
-                                            onDelete={(id) => {
-                                                setGeneratedContent(prev => prev.filter(item => item.id !== id));
-                                            }}
-                                            onSelect={(content) => setSelectedContent(content)}
-                                            onAddToSources={handleAddToSources}
-                                            onUpdateStatus={handleUpdateContentStatus}
-                                        />
-                                    </div>
+                                    {selectedSource ? (
+                                        <>
+                                            <div className="px-4 pb-4">
+                                                <ContentGenerated
+                                                    items={generatedContent}
+                                                    onDelete={handleDeleteContent}
+                                                    onSelect={(content) => setSelectedContent(content)}
+                                                    onAddToSources={handleAddToSources}
+                                                    onUpdateStatus={handleUpdateContentStatus}
+                                                />
+                                            </div>
 
-                                    {/* Empty State - Only show when no content generated */}
-                                    {generatedContent.length === 0 && (
+                                            {generatedContent.length === 0 && (
+                                                <div className="mt-12 text-center px-4">
+                                                    <div className="w-8 h-8 mx-auto mb-3 text-gray-600">
+                                                        <Zap className="w-full h-full opacity-20" />
+                                                    </div>
+                                                    <p className="text-xs text-gray-500 mb-1">No content generated for this source yet.</p>
+                                                </div>
+                                            )}
+                                        </>
+                                    ) : (
                                         <div className="mt-12 text-center px-4">
                                             <div className="w-8 h-8 mx-auto mb-3 text-gray-600">
-                                                <Zap className="w-full h-full opacity-20" />
+                                                <FileText className="w-full h-full opacity-20" />
                                             </div>
-                                            <p className="text-xs text-gray-500 mb-1">Studio output will be saved here.</p>
+                                            <p className="text-xs text-gray-500 mb-1">Select a source to see generated content.</p>
                                         </div>
                                     )}
                                 </div>

@@ -63,8 +63,8 @@ export default function DashboardPage() {
         loadProjects();
     }, []);
 
-    const loadProjects = () => {
-        const allProjects = getAllProjects();
+    const loadProjects = async () => {
+        const allProjects = await getAllProjects();
         setProjects(allProjects);
     };
 
@@ -76,11 +76,11 @@ export default function DashboardPage() {
         router.push(`/project/${id}`);
     };
 
-    const handleDeleteProject = (projectId: string, e: React.MouseEvent) => {
+    const handleDeleteProject = async (projectId: string, e: React.MouseEvent) => {
         e.stopPropagation();
         if (confirm('Are you sure you want to delete this project?')) {
-            deleteProject(projectId);
-            loadProjects();
+            await deleteProject(projectId);
+            await loadProjects();
         }
         setOpenMenuId(null);
     };
@@ -164,7 +164,7 @@ export default function DashboardPage() {
                                     <div className="text-xs text-gray-500">
                                         <span>{formatDate(project.updatedAt)}</span>
                                         <span className="mx-2">•</span>
-                                        <span>{project.paperCount} {project.paperCount === 1 ? 'source' : 'sources'}</span>
+                                        <span>{project.sourceCount} {project.sourceCount === 1 ? 'source' : 'sources'}</span>
                                     </div>
                                 </div>
                             </motion.div>

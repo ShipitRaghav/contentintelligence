@@ -4,7 +4,7 @@ import React, { useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
 import { Clock, FileText, ChevronDown } from 'lucide-react';
 import Link from 'next/link';
-import { getAllProjects, loadProject, saveProject } from '@/lib/projectStorage';
+import { getAllProjects, loadProject, updateContent } from '@/lib/projectStorage';
 import type { GeneratedContent } from '@/types/project';
 import TopNavigation from '@/components/TopNavigation';
 import { useProduct } from '@/lib/productContext';
@@ -24,56 +24,18 @@ export default function CompliancePage() {
     const [viewMode, setViewMode] = useState<'board' | 'list'>('board');
 
     useEffect(() => {
-        // Migration: Update "Review" to "Pending Review"
-        const projects = getAllProjects();
-        let hasChanges = false;
-
-        projects.forEach(meta => {
-            const project = loadProject(meta.id);
-            if (project && project.generatedContent) {
-                let projectChanged = false;
-
-                // Migration: Update "Review" to "Pending Review"
-                project.generatedContent = project.generatedContent.map(item => {
-                    if ((item.complianceStatus as string) === 'Review') {
-                        projectChanged = true;
-                        return { ...item, complianceStatus: 'Pending Review' };
-                    }
-                    return item;
-                });
-
-                // Migration: Shorten content names
-                project.generatedContent = project.generatedContent.map(item => {
-                    let newTitle = item.title;
-                    newTitle = newTitle.replace('Investment Memo', 'Memo');
-                    newTitle = newTitle.replace('Podcast Script', 'Script');
-                    newTitle = newTitle.replace('LinkedIn Post', 'Post');
-                    newTitle = newTitle.replace('Executive Summary', 'Summary');
-                    newTitle = newTitle.replace('Key Takeaways', 'Takeaways');
-
-                    if (newTitle !== item.title) {
-                        projectChanged = true;
-                        return { ...item, title: newTitle };
-                    }
-                    return item;
-                });
-
-                if (projectChanged) {
-                    saveProject(project);
-                    hasChanges = true;
-                }
-            }
-        });
-
         loadComplianceData();
     }, []);
 
-    const loadComplianceData = () => {
-        const metadata = getAllProjects();
+    const loadComplianceData = async () => {
+        const metadata = await getAllProjects();
         const allItems: ComplianceItem[] = [];
 
-        metadata.forEach(meta => {
-            const project = loadProject(meta.id);
+        const projects = await Promise.all(
+            metadata.map(meta => loadProject(meta.id))
+        );
+
+        projects.forEach(project => {
             if (project && project.generatedContent) {
                 project.generatedContent.forEach(content => {
                     allItems.push({
@@ -90,26 +52,14 @@ export default function CompliancePage() {
         setComplianceItems(allItems);
     };
 
-    const handleUpdateStatus = (projectId: string, contentId: string, newStatus: GeneratedContent['complianceStatus']) => {
-        const project = loadProject(projectId);
-        if (project) {
-            project.generatedContent = project.generatedContent.map(item =>
-                item.id === contentId ? { ...item, complianceStatus: newStatus } : item
-            );
-            saveProject(project);
-            loadComplianceData(); // Refresh local state
-        }
+    const handleUpdateStatus = async (projectId: string, contentId: string, newStatus: GeneratedContent['complianceStatus']) => {
+        await updateContent(projectId, contentId, { complianceStatus: newStatus });
+        await loadComplianceData();
     };
 
-    const handleUpdateContent = (projectId: string, contentId: string, updates: { title?: string; assignee?: string }) => {
-        const project = loadProject(projectId);
-        if (project) {
-            project.generatedContent = project.generatedContent.map(item =>
-                item.id === contentId ? { ...item, ...updates } : item
-            );
-            saveProject(project);
-            loadComplianceData(); // Refresh local state
-        }
+    const handleUpdateContent = async (projectId: string, contentId: string, updates: { title?: string; assignee?: string }) => {
+        await updateContent(projectId, contentId, updates);
+        await loadComplianceData();
     };
 
     const getStatusStyles = (status?: string) => {

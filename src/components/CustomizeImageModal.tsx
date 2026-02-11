@@ -17,7 +17,7 @@ export default function CustomizeImageModal({ isOpen, onClose, onGenerate }: Cus
     const [selectedStyle, setSelectedStyle] = useState('Clean modern');
     const [includeText, setIncludeText] = useState(true);
     const [prompt, setPrompt] = useState('');
-    const [imageCount, setImageCount] = useState(3);
+    const [imageCount, setImageCount] = useState(1);
 
     const formats = [
         {
@@ -164,23 +164,7 @@ export default function CustomizeImageModal({ isOpen, onClose, onGenerate }: Cus
 
                     {/* Footer */}
                     <div className={`border-t px-6 py-4 flex justify-end gap-4 ${isFundBuzz ? 'bg-white border-slate-100' : 'bg-[#1a1a1a] border-white/10'}`}>
-                        {/* Image Count Dropdown */}
-                        <div className="relative">
-                            <div className="absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none">
-                                <ImageIcon className={`w-4 h-4 ${isFundBuzz ? 'text-slate-400' : 'text-gray-400'}`} />
-                            </div>
-                            <select
-                                value={imageCount}
-                                onChange={(e) => setImageCount(Number(e.target.value))}
-                                className={`rounded-lg pl-9 pr-8 py-2.5 appearance-none cursor-pointer transition-colors focus:outline-none focus:ring-2 focus:ring-purple-500 text-sm font-medium h-full border ${isFundBuzz ? 'bg-slate-50 border-slate-200 text-slate-900' : 'bg-[#1a1a1a] border-white/20 text-white hover:border-white/40'
-                                    }`}
-                            >
-                                <option value={1} className={isFundBuzz ? 'bg-white text-slate-900' : 'bg-[#1a1a1a]'}>1</option>
-                                <option value={2} className={isFundBuzz ? 'bg-white text-slate-900' : 'bg-[#1a1a1a]'}>2</option>
-                                <option value={3} className={isFundBuzz ? 'bg-white text-slate-900' : 'bg-[#1a1a1a]'}>3</option>
-                            </select>
-                            <ChevronDown className="absolute right-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400 pointer-events-none" />
-                        </div>
+                        {/* Image Count Dropdown - temporarily disabled, locked to 1 */}
 
                         <button
                             onClick={() => {

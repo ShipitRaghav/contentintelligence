@@ -1,172 +1,174 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Copy, ThumbsUp, ThumbsDown, Bookmark, ArrowRight, Sparkles, LayoutTemplate, TrendingUp, User, Bot } from 'lucide-react';
-import type { SummaryData } from '@/types/paper';
+import { Copy, Bookmark, ArrowRight, LayoutTemplate, TrendingUp, User, Bot, ExternalLink, FileText, Youtube, Mic, X } from 'lucide-react';
 import { useProduct } from '@/lib/productContext';
 import ReactMarkdown from 'react-markdown';
+import type { Source } from '@/types/source';
+import type { Chat, ChatMessage, ChatWithMessages, GroundingMetadata } from '@/types/chat';
+import {
+    createChat,
+    getChat,
+    sendChatMessage,
+    getSuggestedQuestions,
+    getTrendingInsights,
+} from '@/lib/projectStorage';
 
 interface ChatInterfaceProps {
-    selectedPaperCount: number;
-    summaryData: SummaryData;
+    projectId: string;
+    selectedSource: Source | null;
     onSaveToNote: (content: string) => void;
-    isLoading?: boolean;
-    sourceTitles?: string[];
+    currentChat: ChatWithMessages | null;
+    onChatCreated: (chat: ChatWithMessages) => void;
+    onMessagesUpdated: (messages: ChatMessage[]) => void;
 }
 
-interface Message {
-    id: string;
-    role: 'user' | 'assistant';
-    content: string;
-}
-
-export default function ChatInterface({ selectedPaperCount, summaryData, onSaveToNote, isLoading = false, sourceTitles = [] }: ChatInterfaceProps) {
-    const [messages, setMessages] = useState<Message[]>([]);
+export default function ChatInterface({
+    projectId,
+    selectedSource,
+    onSaveToNote,
+    currentChat,
+    onChatCreated,
+    onMessagesUpdated,
+}: ChatInterfaceProps) {
     const [inputValue, setInputValue] = useState('');
     const [isTyping, setIsTyping] = useState(false);
+    const [suggestedQuestions, setSuggestedQuestions] = useState<string[]>([]);
+    const [isLoadingQuestions, setIsLoadingQuestions] = useState(false);
+    const [showSourceDetail, setShowSourceDetail] = useState(false);
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const { currentProduct } = useProduct();
     const isFundBuzz = currentProduct === 'fundbuzz';
 
-    const scrollToBottom = () => {
-        messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-    };
+    const messages = currentChat?.messages ?? [];
 
-    const extractKeywords = (titles: string[]) => {
-        const stopWords = new Set(['the', 'and', 'a', 'of', 'in', 'to', 'for', 'with', 'on', 'at', 'by', 'an', 'is', 'are', 'was', 'were', 'be', 'how', 'what', 'why', 'trends', 'report', 'analysis', 'notes', 'transcript', 'video']);
-        const allWords = titles.join(' ').toLowerCase().replace(/[^\w\s]/g, '').split(/\s+/);
-        const freq: { [key: string]: number } = {};
-        allWords.forEach(word => {
-            if (word.length > 3 && !stopWords.has(word)) {
-                freq[word] = (freq[word] || 0) + 1;
-            }
-        });
-        return Object.entries(freq)
-            .sort(([, a], [, b]) => b - a)
-            .slice(0, 5)
-            .map(([word]) => word);
+    const scrollToBottom = () => {
+        messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     };
 
     useEffect(() => {
         scrollToBottom();
     }, [messages, isTyping]);
 
-    const handleSend = async (text: string) => {
-        if (!text.trim()) return;
+    // Load suggested questions when source changes
+    useEffect(() => {
+        if (!selectedSource?.id || !selectedSource.summary) {
+            setSuggestedQuestions([]);
+            return;
+        }
 
-        // Add user message
-        const userMsg: Message = {
-            id: Date.now().toString(),
+        let cancelled = false;
+        setIsLoadingQuestions(true);
+
+        getSuggestedQuestions(projectId, selectedSource.id)
+            .then((questions) => {
+                if (!cancelled) setSuggestedQuestions(questions);
+            })
+            .catch(() => {
+                if (!cancelled) setSuggestedQuestions([]);
+            })
+            .finally(() => {
+                if (!cancelled) setIsLoadingQuestions(false);
+            });
+
+        return () => { cancelled = true; };
+    }, [projectId, selectedSource?.id, selectedSource?.summary]);
+
+    const getSourceContext = useCallback(() => {
+        if (!selectedSource) return '';
+        const parts = [`Title: ${selectedSource.title}`];
+        if (selectedSource.authors) parts.push(`Authors: ${selectedSource.authors}`);
+        if (selectedSource.summary) parts.push(`Summary: ${selectedSource.summary}`);
+        else if (selectedSource.content) parts.push(`Content: ${selectedSource.content.slice(0, 2000)}`);
+        return parts.join('\n');
+    }, [selectedSource]);
+
+    const ensureChat = useCallback(async (): Promise<ChatWithMessages> => {
+        if (currentChat) return currentChat;
+        const newChat = await createChat(projectId);
+        const fullChat: ChatWithMessages = { ...newChat, messages: [] };
+        onChatCreated(fullChat);
+        return fullChat;
+    }, [currentChat, projectId, onChatCreated]);
+
+    const handleSend = async (text: string) => {
+        if (!text.trim() || isTyping) return;
+
+        const chat = await ensureChat();
+        const userMsg: ChatMessage = {
+            id: `temp-${Date.now()}`,
+            chatId: chat.id,
             role: 'user',
-            content: text
+            content: text,
+            createdAt: new Date(),
         };
-        setMessages(prev => [...prev, userMsg]);
+
+        const updatedMessages = [...(chat.messages ?? []), userMsg];
+        onMessagesUpdated(updatedMessages);
         setInputValue('');
         setIsTyping(true);
 
-        // Simulate AI delay and response
-        setTimeout(async () => {
-            let responseContent = "Based on the analysis of these sources, here's the information you requested.";
-
-            if (text.includes("Framing Guidelines")) {
-                const keywords = extractKeywords(sourceTitles);
-                const mainTopic = keywords.length > 0 ? keywords[0] : "your project";
-
-                responseContent = `### Social Media Framing Guidelines for ${mainTopic.charAt(0).toUpperCase() + mainTopic.slice(1)}
-
-Based on your sources, here is the best way to communicate these insights to the public:
-
-- **Educational Authority**: Position the ${mainTopic} analysis as a "must-read" for informed decision-making.
-- **Public Outreach**: Use simple, high-impact hooks like "The future of ${mainTopic} is changing—here's why it matters to you."
-- **Trust & Transparency**: Emphasize that these guidelines are derived directly from institutional reports to build brand credibility.
-- **Action Orientation**: Encourage your audience to "Explore the Full Data" to drive engagement with your primary content.
-
-**Pro Tip**: For LinkedIn, focus on professional resilience. For X/Threads, use the "Algorithm-Driven" hook for maximum reach.`;
-            } else if (text.includes("Trending now")) {
-                try {
-                    const response = await fetch('/api/trends');
-                    const trends = await response.json();
-
-                    const keywords = extractKeywords(sourceTitles);
-
-                    // Filter for finance/news
-                    let newsItems = trends.filter((t: any) => {
-                        if (isFundBuzz) {
-                            // In Fund Buzz, only take Google Trends or specifically Finance-categorized news
-                            return t.platform === 'Google' || t.id.includes('Finance');
-                        }
-                        return t.platform === 'News' || t.platform === 'Google';
-                    });
-
-                    // Try to match keywords if possible
-                    const matchedItems = newsItems.filter((t: any) =>
-                        keywords.some(kw =>
-                            t.topic.toLowerCase().includes(kw) ||
-                            (t.reason && t.reason.toLowerCase().includes(kw))
-                        )
-                    ).slice(0, 3);
-
-                    // Fallback: If no matches, take the top filtered items
-                    const finalItems = matchedItems.length > 0 ? matchedItems : [];
-
-                    // Inject finance publications for Fund Buzz
-                    const publications = ["Wall Street Journal", "MSNBC", "Fox Business", "Bloomberg"];
-
-                    if (isFundBuzz && finalItems.length === 0) {
-                        // Dynamic Fallback for Fund Buzz based on keywords
-                        const kw = keywords.length > 0 ? keywords[0] : "Mutual Funds";
-                        const kw2 = keywords.length > 1 ? keywords[1] : "Active Management";
-
-                        responseContent = `### Trending Insights from your Sources
-
-Based on your current sources, I've identified several key shifts in the US financial landscape:
-
-- **Institutional Pivot on ${kw.charAt(0).toUpperCase() + kw.slice(1)}**: WSJ reports a significant increase in capital rotation toward strategies involving ${kw} and ${kw2}. [Read Article](https://www.wsj.com/finance)
-- **Market Resilience Indicators**: MSNBC highlights that ${kw} is becoming a central pillar for defensive portfolios in the 2026 market. [Read Article](https://www.nbcnews.com/business)
-- **FinTech Integration**: Fox Business emphasizes how AI-driven analysis of ${kw2} is redefining alpha generation for major index funds. [Read Article](https://www.foxbusiness.com/)
-
-- **Strategic Action**: These external hooks strongly validate your current positioning as a leader in informed investment content.`;
-                    } else if (finalItems.length > 0) {
-                        const formattedNews = finalItems.map((item: any, idx: number) => {
-                            const pub = isFundBuzz ? publications[idx % publications.length] : "Google News";
-                            return `- **${item.topic}**: ${item.reason} — *via ${pub}*. [Read Article](${item.link})`;
-                        });
-
-                        responseContent = `### Trending Insights & Market Context
-
-I've correlated your research with the latest movement in US Finance & Tech markets:
-
-${formattedNews.join('\n')}
-
-- **Industry Correlation**: The focus on ${keywords.length > 0 ? `**${keywords[0]}**` : 'these topics'} in your sources aligns with current volatility in broader US markets.
-- **Strategic Hook**: This external context provides a strong "Why Now" narrative for your marketing strategy.`;
-                    } else {
-                        // Generic fallback for non-FundBuzz or absolute zero match
-                        responseContent = `### Trending Insights
-
-- **Educational Equity**: Recent analysis suggests a shift toward the specific pedagogical models mentioned in your sources.
-- **Institutional Adoption**: Industry reports indicate growing interest in the core concepts being explored in this project.
-- **Narrative Opportunity**: Current discourse in this field is moving toward the precise outcomes your content addresses.`;
-                    }
-                } catch (error) {
-                    responseContent = `### Trending Insights from your Sources
-
-- **Mutual Fund Inflows**: WSJ reports a significant shift toward actively managed funds this week.
-- **FinTech Breakout**: MSNBC highlights new AI-driven compliance tools similar to your current focus.
-- **Market Resilience**: Fox Business emphasizes the defensive positioning of major index funds.`;
-                }
-            }
-            else {
-                responseContent = `I've analyzed the ${selectedPaperCount} source(s) and found that your query regarding "${text}" aligns with the key trends in 2026 investment strategies. How else can I help narrow this down for your marketing copy? 💡`;
-            }
-
-            const aiMsg: Message = {
-                id: (Date.now() + 1).toString(),
+        try {
+            const aiMessage = await sendChatMessage(
+                projectId,
+                chat.id,
+                text,
+                getSourceContext()
+            );
+            onMessagesUpdated([...updatedMessages, aiMessage]);
+        } catch (error) {
+            console.error('Failed to send message:', error);
+            const errorMsg: ChatMessage = {
+                id: `error-${Date.now()}`,
+                chatId: chat.id,
                 role: 'assistant',
-                content: responseContent
+                content: 'Sorry, I encountered an error. Please try again.',
+                createdAt: new Date(),
             };
-            setMessages(prev => [...prev, aiMsg]);
+            onMessagesUpdated([...updatedMessages, errorMsg]);
+        } finally {
             setIsTyping(false);
-        }, 1500);
+        }
+    };
+
+    const handleTrending = async () => {
+        if (isTyping) return;
+
+        const chat = await ensureChat();
+        const sourceContext = getSourceContext();
+        if (!sourceContext) return;
+
+        const userMsg: ChatMessage = {
+            id: `temp-${Date.now()}`,
+            chatId: chat.id,
+            role: 'user',
+            content: 'Trending now',
+            createdAt: new Date(),
+        };
+
+        const updatedMessages = [...(chat.messages ?? []), userMsg];
+        onMessagesUpdated(updatedMessages);
+        setIsTyping(true);
+
+        try {
+            const aiMessage = await getTrendingInsights(
+                projectId,
+                chat.id,
+                selectedSource?.summary || selectedSource?.content || selectedSource?.title || ''
+            );
+            onMessagesUpdated([...updatedMessages, aiMessage]);
+        } catch (error) {
+            console.error('Failed to get trending:', error);
+            const errorMsg: ChatMessage = {
+                id: `error-${Date.now()}`,
+                chatId: chat.id,
+                role: 'assistant',
+                content: 'Sorry, I could not retrieve trending insights. Please try again.',
+                createdAt: new Date(),
+            };
+            onMessagesUpdated([...updatedMessages, errorMsg]);
+        } finally {
+            setIsTyping(false);
+        }
     };
 
     const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -176,120 +178,156 @@ ${formattedNews.join('\n')}
         }
     };
 
+    const sourceIcon = selectedSource?.type === 'video'
+        ? <Youtube className="w-4 h-4 text-red-500" />
+        : selectedSource?.type === 'audio'
+            ? <Mic className="w-4 h-4 text-pink-500" />
+            : <FileText className="w-4 h-4 text-purple-500" />;
+
+    // Empty state when no source selected
+    if (!selectedSource) {
+        return (
+            <div className={`flex flex-col h-full items-center justify-center ${isFundBuzz ? 'bg-slate-50' : 'bg-transparent'}`}>
+                <div className={`w-12 h-12 rounded-xl flex items-center justify-center mb-4 ${isFundBuzz ? 'bg-slate-200' : 'bg-white/10'}`}>
+                    <FileText className={`w-6 h-6 ${isFundBuzz ? 'text-slate-400' : 'text-gray-500'}`} />
+                </div>
+                <p className={`text-sm ${isFundBuzz ? 'text-slate-500' : 'text-gray-400'}`}>
+                    Select a source to begin chatting
+                </p>
+            </div>
+        );
+    }
+
     return (
-        <div className={`flex flex-col h-full relative ${isFundBuzz ? 'bg-slate-50' : 'bg-transparent'}`}>
+        <div className={`flex flex-col h-full min-h-0 relative ${isFundBuzz ? 'bg-slate-50' : 'bg-transparent'}`}>
             {/* Scrollable Content */}
-            <div className={`flex-1 overflow-y-auto p-8 pb-44 scrollbar-hide`}>
+            <div className="flex-1 min-h-0 overflow-y-auto p-8 pb-44 scrollbar-hide">
                 <motion.div
                     initial={{ opacity: 0, y: 20 }}
                     animate={{ opacity: 1, y: 0 }}
                     transition={{ duration: 0.5 }}
                     className="max-w-3xl mx-auto space-y-5"
                 >
-                    {/* Header */}
-                    <div className="space-y-3">
-                        <div className={`w-12 h-12 rounded-xl flex items-center justify-center mb-4 shadow-sm ${isFundBuzz ? 'bg-blue-600' : 'bg-gradient-to-br from-orange-400 to-pink-500'}`}>
-                            <Sparkles className="w-6 h-6 text-white" />
-                        </div>
-
-                        {isLoading ? (
-                            <div className="space-y-2 animate-pulse w-full">
-                                <div className={`h-10 w-full rounded-lg ${isFundBuzz ? 'bg-slate-200' : 'bg-white/10'}`} />
-                                <div className={`h-4 w-1/3 rounded-lg ${isFundBuzz ? 'bg-slate-100' : 'bg-white/5'}`} />
+                    {/* Compact Source Card */}
+                    <div
+                        onClick={() => setShowSourceDetail(true)}
+                        className={`rounded-xl p-4 border cursor-pointer transition-all ${isFundBuzz ? 'bg-white border-slate-200 shadow-sm hover:shadow-md hover:border-slate-300' : 'bg-[#1e293b] border-white/10 hover:border-white/20'}`}
+                    >
+                        <div className="flex items-start gap-3">
+                            <div className={`w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0 ${isFundBuzz ? 'bg-slate-100' : 'bg-white/10'}`}>
+                                {sourceIcon}
                             </div>
-                        ) : (
-                            <>
-                                <h1 className={`text-4xl font-bold leading-tight ${isFundBuzz ? 'text-slate-900' : 'text-white'}`}>
-                                    {summaryData.title}
-                                </h1>
-
-                                <p className={`text-sm font-medium ${isFundBuzz ? 'text-slate-500' : 'text-gray-400'}`}>
-                                    {selectedPaperCount} {selectedPaperCount === 1 ? 'source' : 'sources'}
+                            <div className="flex-1 min-w-0">
+                                <h3 className={`font-semibold text-sm leading-tight truncate ${isFundBuzz ? 'text-slate-900' : 'text-white'}`}>
+                                    {selectedSource.title}
+                                </h3>
+                                <p className={`text-xs mt-0.5 ${isFundBuzz ? 'text-slate-500' : 'text-gray-400'}`}>
+                                    {[selectedSource.authors, selectedSource.year].filter(Boolean).join(' · ')}
                                 </p>
-                            </>
-                        )}
+                                {selectedSource.summary && (
+                                    <p className={`text-xs mt-2 line-clamp-3 ${isFundBuzz ? 'text-slate-600' : 'text-gray-300'}`}>
+                                        {selectedSource.summary.slice(0, 300)}{selectedSource.summary.length > 300 ? '...' : ''}
+                                    </p>
+                                )}
+                            </div>
+                        </div>
                     </div>
 
-                    {/* Summary */}
-                    <div className={`prose max-w-none ${isFundBuzz ? 'prose-slate' : 'prose-invert'} min-h-[180px]`}>
-                        {isLoading ? (
-                            <div className="space-y-4 animate-pulse w-full">
-                                <div className="space-y-2">
-                                    <div className={`h-4 w-full rounded-lg ${isFundBuzz ? 'bg-slate-200' : 'bg-white/10'}`} />
-                                    <div className={`h-4 w-full rounded-lg ${isFundBuzz ? 'bg-slate-200' : 'bg-white/10'}`} />
-                                    <div className={`h-4 w-full rounded-lg ${isFundBuzz ? 'bg-slate-200' : 'bg-white/10'}`} />
-                                    <div className={`h-4 w-11/12 rounded-lg ${isFundBuzz ? 'bg-slate-200' : 'bg-white/10'}`} />
-                                </div>
-                                <div className="space-y-2 pt-2">
-                                    <div className={`h-4 w-full rounded-lg ${isFundBuzz ? 'bg-slate-100' : 'bg-white/5'}`} />
-                                    <div className={`h-4 w-10/12 rounded-lg ${isFundBuzz ? 'bg-slate-100' : 'bg-white/5'}`} />
-                                </div>
-                            </div>
-                        ) : (
-                            <div className={`leading-snug text-lg ${isFundBuzz ? 'text-slate-800' : 'text-gray-300'}`}>
-                                <ReactMarkdown>{summaryData.summary}</ReactMarkdown>
-                            </div>
-                        )}
-                    </div>
-
-                    {/* Actions */}
-                    <div className={`flex items-center gap-4 pt-2 border-b pb-6 ${isFundBuzz ? 'border-slate-200' : 'border-white/10'}`}>
-                        {!isLoading ? (
-                            <>
-                                <button
-                                    onClick={() => onSaveToNote(summaryData.summary)}
-                                    className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors ${isFundBuzz ? 'bg-blue-600 hover:bg-blue-700 text-white shadow-sm' : 'bg-white/10 hover:bg-white/20 text-white'}`}
+                    {/* Source Detail Popup */}
+                    <AnimatePresence>
+                        {showSourceDetail && (
+                            <motion.div
+                                initial={{ opacity: 0 }}
+                                animate={{ opacity: 1 }}
+                                exit={{ opacity: 0 }}
+                                className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4"
+                                onClick={() => setShowSourceDetail(false)}
+                            >
+                                <motion.div
+                                    initial={{ opacity: 0, scale: 0.95 }}
+                                    animate={{ opacity: 1, scale: 1 }}
+                                    exit={{ opacity: 0, scale: 0.95 }}
+                                    transition={{ duration: 0.2 }}
+                                    onClick={(e) => e.stopPropagation()}
+                                    className={`w-full max-w-2xl max-h-[80vh] rounded-2xl shadow-2xl overflow-hidden flex flex-col ${isFundBuzz ? 'bg-white' : 'bg-[#1e293b] border border-white/10'}`}
                                 >
-                                    <Bookmark className="w-4 h-4" />
-                                    Save to note
-                                </button>
-                                <div className="flex items-center gap-2">
-                                    <button className={`p-2 rounded-lg transition-colors ${isFundBuzz ? 'hover:bg-slate-200 text-slate-500 hover:text-slate-900' : 'hover:bg-white/10 text-gray-400 hover:text-white'}`}>
-                                        <Copy className="w-4 h-4" />
-                                    </button>
-                                    <button className={`p-2 rounded-lg transition-colors ${isFundBuzz ? 'hover:bg-slate-200 text-slate-500 hover:text-slate-900' : 'hover:bg-white/10 text-gray-400 hover:text-white'}`}>
-                                        <ThumbsUp className="w-4 h-4" />
-                                    </button>
-                                    <button className={`p-2 rounded-lg transition-colors ${isFundBuzz ? 'hover:bg-slate-200 text-slate-500 hover:text-slate-900' : 'hover:bg-white/10 text-gray-400 hover:text-white'}`}>
-                                        <ThumbsDown className="w-4 h-4" />
-                                    </button>
-                                </div>
-                            </>
-                        ) : (
-                            <div className="flex items-center gap-4 animate-pulse w-full">
-                                <div className={`h-9 w-32 rounded-lg ${isFundBuzz ? 'bg-slate-200' : 'bg-white/10'}`} />
-                                <div className={`h-9 w-32 rounded-lg ${isFundBuzz ? 'bg-slate-100' : 'bg-white/5'}`} />
-                            </div>
-                        )}
-                    </div>
+                                    {/* Header */}
+                                    <div className={`flex items-start gap-3 p-6 pb-4 border-b ${isFundBuzz ? 'border-slate-200' : 'border-white/10'}`}>
+                                        <div className={`w-10 h-10 rounded-lg flex items-center justify-center flex-shrink-0 ${isFundBuzz ? 'bg-slate-100' : 'bg-white/10'}`}>
+                                            {sourceIcon}
+                                        </div>
+                                        <div className="flex-1 min-w-0">
+                                            <h3 className={`font-semibold text-base leading-tight ${isFundBuzz ? 'text-slate-900' : 'text-white'}`}>
+                                                {selectedSource.title}
+                                            </h3>
+                                            <p className={`text-sm mt-1 ${isFundBuzz ? 'text-slate-500' : 'text-gray-400'}`}>
+                                                {[selectedSource.authors, selectedSource.year].filter(Boolean).join(' · ')}
+                                            </p>
+                                        </div>
+                                        <button
+                                            onClick={() => setShowSourceDetail(false)}
+                                            className={`p-1.5 rounded-lg transition-colors flex-shrink-0 ${isFundBuzz ? 'hover:bg-slate-100 text-slate-400' : 'hover:bg-white/10 text-gray-400'}`}
+                                        >
+                                            <X className="w-5 h-5" />
+                                        </button>
+                                    </div>
 
-                    {/* Suggested Questions (Only show if no messages yet) */}
-                    {messages.length === 0 && !isLoading && (
+                                    {/* Body */}
+                                    <div className="flex-1 overflow-y-auto p-6 scrollbar-hide">
+                                        {selectedSource.summary && (
+                                            <div className="mb-4">
+                                                <h4 className={`text-xs font-semibold uppercase tracking-wider mb-2 ${isFundBuzz ? 'text-slate-400' : 'text-gray-500'}`}>
+                                                    Summary
+                                                </h4>
+                                                <p className={`text-sm leading-relaxed ${isFundBuzz ? 'text-slate-700' : 'text-gray-300'}`}>
+                                                    {selectedSource.summary}
+                                                </p>
+                                            </div>
+                                        )}
+                                        {selectedSource.content && (
+                                            <div>
+                                                <h4 className={`text-xs font-semibold uppercase tracking-wider mb-2 ${isFundBuzz ? 'text-slate-400' : 'text-gray-500'}`}>
+                                                    Content
+                                                </h4>
+                                                <p className={`text-sm leading-relaxed whitespace-pre-wrap ${isFundBuzz ? 'text-slate-700' : 'text-gray-300'}`}>
+                                                    {selectedSource.content}
+                                                </p>
+                                            </div>
+                                        )}
+                                    </div>
+                                </motion.div>
+                            </motion.div>
+                        )}
+                    </AnimatePresence>
+
+                    {/* Suggested Questions (only when no messages yet) */}
+                    {messages.length === 0 && !isLoadingQuestions && suggestedQuestions.length > 0 && (
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-2">
-                            {summaryData.questions.slice(0, 3).map((question, index) => (
+                            {suggestedQuestions.map((question, index) => (
                                 <button
                                     key={index}
                                     onClick={() => handleSend(question)}
                                     className={`text-left p-3.5 rounded-xl transition-all group ${index === 2 ? 'md:col-span-2' : ''} ${isFundBuzz
                                         ? 'bg-white border border-slate-200 hover:border-blue-300 hover:shadow-md text-slate-700'
-                                        : 'bg-[#1e293b] border border-white/10 hover:bg-white/5 text-gray-300 group-hover:text-white'
+                                        : 'bg-[#1e293b] border border-white/10 hover:bg-white/5 text-gray-300'
                                         }`}
                                 >
-                                    <p className="text-sm font-medium leading-tight">
-                                        {question}
-                                    </p>
+                                    <p className="text-sm font-medium leading-tight">{question}</p>
                                 </button>
                             ))}
                         </div>
-                    ) || isLoading && (
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-2 animate-pulse w-full">
-                            <div className={`h-14 rounded-xl md:col-span-1 ${isFundBuzz ? 'bg-white border border-slate-100' : 'bg-white/5 border border-white/10'}`} />
-                            <div className={`h-14 rounded-xl md:col-span-1 ${isFundBuzz ? 'bg-white border border-slate-100' : 'bg-white/5 border border-white/10'}`} />
+                    )}
+
+                    {/* Loading questions skeleton */}
+                    {messages.length === 0 && isLoadingQuestions && (
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-2 animate-pulse">
+                            <div className={`h-14 rounded-xl ${isFundBuzz ? 'bg-white border border-slate-100' : 'bg-white/5 border border-white/10'}`} />
+                            <div className={`h-14 rounded-xl ${isFundBuzz ? 'bg-white border border-slate-100' : 'bg-white/5 border border-white/10'}`} />
                             <div className={`h-14 rounded-xl md:col-span-2 ${isFundBuzz ? 'bg-white border border-slate-100' : 'bg-white/5 border border-white/10'}`} />
                         </div>
                     )}
 
-                    {/* Chat History */}
+                    {/* Chat Messages */}
                     <div className="space-y-4 pt-2">
                         {messages.map((msg) => (
                             <motion.div
@@ -325,8 +363,38 @@ ${formattedNews.join('\n')}
                                             {msg.content}
                                         </ReactMarkdown>
                                     </div>
-                                    {msg.role === 'assistant' && (
+
+                                    {/* Grounding Sources */}
+                                    {msg.role === 'assistant' && msg.groundingMetadata?.groundingChunks && msg.groundingMetadata.groundingChunks.length > 0 && (
                                         <div className={`mt-3 pt-3 border-t ${isFundBuzz ? 'border-slate-100' : 'border-white/10'}`}>
+                                            <p className={`text-xs font-medium mb-2 ${isFundBuzz ? 'text-slate-500' : 'text-gray-400'}`}>
+                                                Sources
+                                            </p>
+                                            <div className="flex flex-wrap gap-2">
+                                                {msg.groundingMetadata.groundingChunks.map((chunk, idx) => (
+                                                    chunk.web?.uri && (
+                                                        <a
+                                                            key={idx}
+                                                            href={chunk.web.uri}
+                                                            target="_blank"
+                                                            rel="noopener noreferrer"
+                                                            className={`inline-flex items-center gap-1 text-xs px-2 py-1 rounded-md transition-colors ${isFundBuzz
+                                                                ? 'bg-blue-50 text-blue-700 hover:bg-blue-100'
+                                                                : 'bg-white/5 text-blue-400 hover:bg-white/10'
+                                                                }`}
+                                                        >
+                                                            <ExternalLink className="w-3 h-3" />
+                                                            {chunk.web.title || new URL(chunk.web.uri).hostname}
+                                                        </a>
+                                                    )
+                                                ))}
+                                            </div>
+                                        </div>
+                                    )}
+
+                                    {/* Save to note button */}
+                                    {msg.role === 'assistant' && (
+                                        <div className={`mt-3 pt-3 border-t ${isFundBuzz ? 'border-slate-100' : 'border-white/10'} ${msg.groundingMetadata?.groundingChunks?.length ? '' : ''}`}>
                                             <button
                                                 onClick={() => onSaveToNote(msg.content)}
                                                 className={`flex items-center gap-2 px-4 py-1.5 rounded-lg text-sm font-medium transition-colors ${isFundBuzz ? 'bg-blue-600 hover:bg-blue-700 text-white shadow-sm' : 'bg-white/10 hover:bg-white/20 text-white'}`}
@@ -339,6 +407,8 @@ ${formattedNews.join('\n')}
                                 </div>
                             </motion.div>
                         ))}
+
+                        {/* Typing indicator */}
                         {isTyping && (
                             <motion.div
                                 initial={{ opacity: 0, y: 10 }}
@@ -358,18 +428,17 @@ ${formattedNews.join('\n')}
                         <div ref={messagesEndRef} />
                     </div>
                 </motion.div>
-            </div >
+            </div>
 
             {/* Input Area */}
-            < div className={`absolute bottom-0 left-0 right-0 p-6 bg-gradient-to-t pointer-events-none z-20 ${isFundBuzz ? 'from-slate-50 via-slate-50/80 to-transparent' : 'from-[#0f172a] via-[#0f172a] to-transparent'}`
-            }>
+            <div className={`absolute bottom-0 left-0 right-0 p-6 bg-gradient-to-t pointer-events-none z-20 ${isFundBuzz ? 'from-slate-50 via-slate-50/80 to-transparent' : 'from-[#0f172a] via-[#0f172a] to-transparent'}`}>
                 <div className="max-w-3xl mx-auto relative px-4 md:px-0 pointer-events-auto">
                     {/* Quick Actions */}
                     <div className="flex items-center gap-3 mb-4 overflow-x-auto scrollbar-hide">
                         <button
-                            disabled={isLoading}
-                            onClick={() => handleSend("Framing Guidelines")}
-                            className={`flex items-center gap-2 px-4 py-2 border rounded-xl transition-all whitespace-nowrap group shadow-sm ${isLoading ? 'opacity-50 cursor-not-allowed' : ''} ${isFundBuzz
+                            disabled={isTyping}
+                            onClick={() => handleSend('Framing Guidelines')}
+                            className={`flex items-center gap-2 px-4 py-2 border rounded-xl transition-all whitespace-nowrap group shadow-sm ${isTyping ? 'opacity-50 cursor-not-allowed' : ''} ${isFundBuzz
                                 ? 'bg-purple-600 border-purple-500 hover:bg-purple-700 text-white'
                                 : 'bg-purple-500/10 hover:bg-purple-500/20 border-purple-500/20 text-purple-200'
                                 }`}
@@ -378,9 +447,9 @@ ${formattedNews.join('\n')}
                             <span className="text-sm font-medium">Framing Guidelines</span>
                         </button>
                         <button
-                            disabled={isLoading}
-                            onClick={() => handleSend("Trending now")}
-                            className={`flex items-center gap-2 px-4 py-2 border rounded-xl transition-all whitespace-nowrap group shadow-sm ${isLoading ? 'opacity-50 cursor-not-allowed' : ''} ${isFundBuzz
+                            disabled={isTyping}
+                            onClick={handleTrending}
+                            className={`flex items-center gap-2 px-4 py-2 border rounded-xl transition-all whitespace-nowrap group shadow-sm ${isTyping ? 'opacity-50 cursor-not-allowed' : ''} ${isFundBuzz
                                 ? 'bg-amber-600 border-amber-500 hover:bg-amber-700 text-white'
                                 : 'bg-amber-500/10 hover:bg-amber-500/20 border-amber-500/20 text-amber-200'
                                 }`}
@@ -396,28 +465,25 @@ ${formattedNews.join('\n')}
                             value={inputValue}
                             onChange={(e) => setInputValue(e.target.value)}
                             onKeyDown={handleKeyDown}
-                            disabled={isLoading}
-                            placeholder={isLoading ? "Generating summary..." : "Start typing..."}
-                            className={`w-full border rounded-2xl py-4 pl-6 pr-32 transition-all shadow-lg ${isFundBuzz
+                            disabled={isTyping}
+                            placeholder={isTyping ? 'Thinking...' : 'Ask about this source...'}
+                            className={`w-full border rounded-2xl py-4 pl-6 pr-16 transition-all shadow-lg ${isFundBuzz
                                 ? 'bg-white border-slate-200 text-slate-900 placeholder-slate-400 focus:border-blue-500 focus:ring-1 focus:ring-blue-500'
                                 : 'bg-[#1e293b] border-white/10 text-white placeholder-gray-500 focus:border-blue-500/50 focus:ring-1 focus:ring-blue-500/50'
-                                } ${isLoading ? 'opacity-50' : ''}`}
+                                } ${isTyping ? 'opacity-50' : ''}`}
                         />
-                        <div className="absolute right-3 top-1/2 -translate-y-1/2 flex items-center gap-3">
-                            <span className={`text-xs font-medium ${isFundBuzz ? 'text-slate-400' : 'text-gray-500'}`}>
-                                {selectedPaperCount} {selectedPaperCount === 1 ? 'source' : 'sources'}
-                            </span>
+                        <div className="absolute right-3 top-1/2 -translate-y-1/2">
                             <button
                                 onClick={() => handleSend(inputValue)}
-                                disabled={isLoading}
-                                className={`p-2 rounded-full transition-colors shadow-sm ${isFundBuzz ? 'bg-blue-600 text-white hover:bg-blue-700' : 'bg-white text-black hover:bg-gray-200'} ${isLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
+                                disabled={isTyping}
+                                className={`p-2 rounded-full transition-colors shadow-sm ${isFundBuzz ? 'bg-blue-600 text-white hover:bg-blue-700' : 'bg-white text-black hover:bg-gray-200'} ${isTyping ? 'opacity-50 cursor-not-allowed' : ''}`}
                             >
                                 <ArrowRight className="w-4 h-4" />
                             </button>
                         </div>
                     </div>
                 </div>
-            </div >
-        </div >
+            </div>
+        </div>
     );
 }

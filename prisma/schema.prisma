@@ -1,0 +1,107 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Project {
+  id               String             @id @default(cuid())
+  title            String             @default("Untitled Project")
+  searchQuery      String             @default("")
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
+  summaryData      Json?
+
+  sources          Source[]
+  generatedContent GeneratedContent[]
+  chats            Chat[]
+}
+
+model Source {
+  id        String   @id @default(cuid())
+  projectId String
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  // Core source info
+  type      String              // 'website' | 'video' | 'audio' | 'document' | 'text'
+  url       String?
+  title     String
+  authors   String              @default("")
+  year      Int                 @default(2025)
+  content   String?
+
+  // AI processing (Diaflow output)
+  transcript       String?
+  summary          String?
+  diaflowSessionId String?
+  processingStatus String     @default("pending")
+
+  // Flexible metadata (type-specific, stored as JSON)
+  metadata  Json     @default("{}")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  generatedContent GeneratedContent[]
+
+  @@index([projectId])
+  @@index([diaflowSessionId])
+}
+
+model GeneratedContent {
+  id               String   @id @default(cuid())
+  title            String
+  type             String
+  format           String?
+  content          String?  @db.Text
+  url              String?
+  complianceStatus String   @default("Draft")
+  assignee         String?
+  createdAt        DateTime @default(now())
+
+  // Link to source
+  sourceId String?
+  source   Source?  @relation(fields: [sourceId], references: [id], onDelete: SetNull)
+
+  // Diaflow processing
+  diaflowSessionId String?
+  processingStatus String   @default("completed")
+
+  // Image binary storage (replaces expiring CDN URLs)
+  imageData     Bytes?
+  imageMimeType String?
+
+  projectId String
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+  @@index([sourceId])
+  @@index([diaflowSessionId])
+}
+
+model Chat {
+  id        String    @id @default(cuid())
+  projectId String
+  project   Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  title     String    @default("New Chat")
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  messages  Message[]
+
+  @@index([projectId])
+}
+
+model Message {
+  id                String   @id @default(cuid())
+  chatId            String
+  chat              Chat     @relation(fields: [chatId], references: [id], onDelete: Cascade)
+  role              String
+  content           String   @db.Text
+  groundingMetadata Json?
+  createdAt         DateTime @default(now())
+
+  @@index([chatId])
+}

@@ -6,14 +6,18 @@ import { useProduct } from '@/lib/productContext';
 interface CustomizeTextModalProps {
     isOpen: boolean;
     onClose: () => void;
-    onGenerate?: (title: string, format: string, layout: string[], focus: string, boosts: string[]) => void;
+    onGenerate?: (title: string, format: string, layout: string[], focus: string, boosts: string[], contextSource: 'summary' | 'transcript') => void;
+    sourceType?: string;
+    hasTranscript?: boolean;
 }
 
-export default function CustomizeTextModal({ isOpen, onClose, onGenerate }: CustomizeTextModalProps) {
+export default function CustomizeTextModal({ isOpen, onClose, onGenerate, sourceType, hasTranscript }: CustomizeTextModalProps) {
     const { currentProduct } = useProduct();
     const isFundBuzz = currentProduct === 'fundbuzz';
 
     const [selectedFormat, setSelectedFormat] = useState('Thread Pack');
+    const [contextSource, setContextSource] = useState<'summary' | 'transcript'>('summary');
+    const showTranscriptToggle = (sourceType === 'video' || sourceType === 'audio') && hasTranscript;
     const [selectedLanguage, setSelectedLanguage] = useState('English');
     const [selectedLength, setSelectedLength] = useState('Default');
     const [selectedVibe, setSelectedVibe] = useState('');
@@ -201,6 +205,30 @@ export default function CustomizeTextModal({ isOpen, onClose, onGenerate }: Cust
                                     <X className="w-5 h-5" />
                                 </button>
                             </div>
+
+                            {/* Source Context Toggle - only for video/audio with transcript */}
+                            {showTranscriptToggle && (
+                                <div className="mb-8">
+                                    <label className={`text-sm font-medium mb-3 block ${isFundBuzz ? 'text-slate-500' : 'text-gray-300'}`}>Source Context</label>
+                                    <div className={`inline-flex rounded-lg p-1 border ${isFundBuzz ? 'bg-slate-50 border-slate-200' : 'bg-white/5 border-white/10'}`}>
+                                        {(['summary', 'transcript'] as const).map((option) => (
+                                            <button
+                                                key={option}
+                                                onClick={() => setContextSource(option)}
+                                                className={`px-6 py-2 rounded-md text-sm font-medium transition-all ${contextSource === option
+                                                    ? (isFundBuzz ? 'bg-white text-blue-600 shadow-sm' : 'bg-white/10 text-white shadow-sm')
+                                                    : (isFundBuzz ? 'text-slate-500 hover:text-slate-900' : 'text-gray-400 hover:text-white')
+                                                    }`}
+                                            >
+                                                {option === 'summary' ? 'Summary' : 'Transcript'}
+                                            </button>
+                                        ))}
+                                    </div>
+                                    <p className={`text-xs mt-2 ${isFundBuzz ? 'text-slate-400' : 'text-gray-500'}`}>
+                                        Choose whether the AI uses the source summary or full transcript as context.
+                                    </p>
+                                </div>
+                            )}
 
                             {/* Formats Section */}
                             <div className="mb-8">
@@ -559,7 +587,7 @@ export default function CustomizeTextModal({ isOpen, onClose, onGenerate }: Cust
                         <button
                             onClick={() => {
                                 if (onGenerate) {
-                                    onGenerate(selectedFormat, selectedFormat, layoutRows, aiFocus, selectedBoosts);
+                                    onGenerate(selectedFormat, selectedFormat, layoutRows, aiFocus, selectedBoosts, contextSource);
                                     onClose();
                                 }
                             }}
